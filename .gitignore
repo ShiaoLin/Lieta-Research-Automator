@@ -1,0 +1,21 @@
+# Chrome User Profile - EXTREMELY SENSITIVE
+# Contains cookies, session data, browsing history, etc.
+automation_profile/
+
+# User-specific settings and data
+user_settings.json
+*.txt
+*.lnk
+
+# Logs and temporary files
+log.jsonl
+temp_downloads/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE/OS specific
+.vscode/
+.idea/
+.DS_Store
