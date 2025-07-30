@@ -31,14 +31,15 @@ def find_chrome_executable():
     return None
 
 
-def create_debug_shortcut(project_root, chrome_path):
+def create_debug_shortcut(chrome_path):
     """
     Creates a shortcut in the project root to launch Chrome in debug mode.
     """
-    shortcut_path = os.path.join(project_root, SHORTCUT_NAME)
+    shortcut_path = os.path.join(config.BASE_DIR, SHORTCUT_NAME)
     target = chrome_path
     
-    user_data_full_path = os.path.join(project_root, config.CHROME_USER_DATA_DIR)
+    # CHROME_USER_DATA_DIR is now an absolute path from config
+    user_data_full_path = config.CHROME_USER_DATA_DIR
     
     args = (
         f'--remote-debugging-port={config.REMOTE_DEBUGGING_PORT} '
@@ -50,7 +51,7 @@ def create_debug_shortcut(project_root, chrome_path):
         link.path = target
         link.arguments = args
         link.description = f"以遠端偵錯模式 (Port {config.REMOTE_DEBUGGING_PORT}) 啟動 Chrome"
-        link.working_directory = project_root
+        link.working_directory = config.BASE_DIR
 
     return shortcut_path
 
@@ -67,7 +68,7 @@ def is_port_in_use(port):
             return True
 
 
-def ensure_chrome_is_running(project_root):
+def ensure_chrome_is_running():
     """
     Main function to ensure Chrome is running in debug mode.
     """
@@ -80,7 +81,7 @@ def ensure_chrome_is_running(project_root):
 
     logger.info(f"正在建立/更新 '{SHORTCUT_NAME}' 捷徑...")
     try:
-        shortcut_path = create_debug_shortcut(project_root, chrome_path)
+        shortcut_path = create_debug_shortcut(chrome_path)
         logger.info(f"成功建立捷徑於: {shortcut_path}")
     except Exception as e:
         logger.error(f"無法建立捷徑: {e}", exc_info=True)
