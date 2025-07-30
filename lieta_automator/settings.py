@@ -1,8 +1,10 @@
 import json
 import os
 
-# Use a simple JSON file to store user settings
-SETTINGS_FILE = "user_settings.json"
+from . import config # Import the config module
+
+# Use the absolute path from the config module
+SETTINGS_FILE = os.path.join(config.BASE_DIR, "user_settings.json")
 
 def load_settings():
     """Loads settings from the JSON file."""

@@ -15,11 +15,12 @@ def main():
     - Ensures Chrome is running in debug mode.
     - Initializes and runs the Tkinter GUI.
     """
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     if sys.platform == "win32":
         logger.info("--- 正在準備 Chrome 瀏覽器 ---")
-        is_chrome_ready = chrome_launcher.ensure_chrome_is_running(project_root)
+        # The new `ensure_chrome_is_running` doesn't need the project_root argument
+        # as it gets the base directory directly from the config module.
+        is_chrome_ready = chrome_launcher.ensure_chrome_is_running()
         logger.info("--- Chrome 準備完畢 ---")
         if not is_chrome_ready:
             # The launcher itself will log the specific error.

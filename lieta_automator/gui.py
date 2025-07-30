@@ -27,7 +27,8 @@ class TickerApp:
         self.tickers_path = self.user_settings.get("last_ticker_path", "")
         self.destination_path = self.user_settings.get("last_destination_path", "")
         
-        self.temp_download_path = os.path.join(os.getcwd(), config.TEMP_DOWNLOAD_DIR_NAME)
+        # Use the absolute path for the temp download directory from config
+        self.temp_download_path = config.TEMP_DOWNLOAD_DIR_NAME
         
         if os.path.exists(self.temp_download_path):
             shutil.rmtree(self.temp_download_path)

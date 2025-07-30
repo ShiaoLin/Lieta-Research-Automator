@@ -4,8 +4,11 @@ import os
 import tkinter as tk
 from logging import FileHandler, Handler, LogRecord
 
+from . import config # Import the config module
+
 # --- Configuration ---
-LOG_FILE_PATH = "log.jsonl"  # Use .jsonl extension for JSON Lines
+# Use the absolute path from the config module
+LOG_FILE_PATH = os.path.join(config.BASE_DIR, "log.jsonl")
 LOG_LEVEL = logging.INFO
 
 # --- Custom JSON Formatter ---

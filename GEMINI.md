@@ -1,7 +1,3 @@
----
-title: Lieta Research Automator
----
-
 # Lieta Research 自動化工具架構說明
 > **目的**
 > 透過 GUI 讓非程式人員一次輸入多個 Ticker，批次呼叫 Lieta Research Web 平台下載各種量化模型（Gamma／Term／Smile／TV Code）結果，並依模型與時間戳自動整理檔案後搬移至指定資料夾。
@@ -14,7 +10,7 @@ title: Lieta Research Automator
 /
 ├── lieta_automator/
 │   ├── __init__.py           # 將資料夾標示為 Python 套件
-│   ├── main.py               # 應用程式主進入點
+│   ├── main.py               # 應用程式主邏輯進入點
 │   ├── gui.py                # 包含 TickerApp 類別，處理使用者介面
 │   ├── scraper.py            # 包含 LietaScraper 類別，處理網頁自動化
 │   ├── chrome_launcher.py    # 處理啟動與檢查偵錯模式的 Chrome
@@ -24,6 +20,7 @@ title: Lieta Research Automator
 │
 ├── .gitignore                # 告訴 Git 忽略哪些檔案
 ├── requirements.txt          # 列出所有必要的 Python 套件
+├── run.py                    # **打包與執行的主要入口點**
 ├── user_settings.json        # 儲存使用者的偏好設定 (自動生成, 已被 gitignore)
 ├── log.jsonl                 # 結構化的日誌輸出檔案 (自動生成, 已被 gitignore)
 └── 啟動偵錯模式Chrome.lnk    # 快速啟動 Chrome 的捷徑 (已被 gitignore)
@@ -47,7 +44,7 @@ pip install -r requirements.txt
 ### 2.2. 執行程式
 使用以下指令從專案根目錄啟動應用程式：
 ```bash
-python -m lieta_automator.main
+python run.py
 ```
 程式啟動時會自動檢查 Chrome 是否以偵錯模式執行，並提供指引。
 
@@ -62,6 +59,7 @@ python -m lieta_automator.main
 - `log.jsonl`: 包含操作紀錄的日誌檔。
 - `*.txt`, `*.lnk`: 使用者自訂的 Ticker 列表和本機捷徑。
 - `temp_downloads/`, `__pycache__/`: 暫存與快取檔案。
+- `dist/`, `build/`, `*.spec`: PyInstaller 產生的打包檔案。
 
 ### 3.2. 程式碼安全
 - **無憑證管理**: 程式不儲存或處理使用者帳號密碼，而是依賴使用者已登入的瀏覽器會話。
@@ -131,13 +129,14 @@ classDiagram
 
 | 模組 | 類別/函式 | 關鍵職責 |
 | --- | --- | --- |
+| `run.py` | (無類別) | - **應用程式主入口點**。<br>- 呼叫 `lieta_automator.main` 來啟動程式。<br>- 解決 PyInstaller 打包時的相對路徑導入問題。 |
 | `gui.py` | `TickerApp` | - 建立所有 GUI 元件，處理使用者互動。<br>- 呼叫 `chrome_launcher` 確保瀏覽器就緒。<br>- 從 `settings` 模組載入/儲存使用者偏好。<br>- 在獨立執行緒中啟動 `LietaScraper`，防止介面凍結。<br>- 將日誌顯示在 GUI 上。 |
 | `scraper.py` | `LietaScraper` | - 附掛到已在偵錯模式下執行的 Chrome。<br>- **檢查登入狀態**：透過檢查網址是否為 `/platform` 來確認。<br>- **執行 Selenium 操作**：包含切換模型、輸入 Ticker、點擊下載。<br>- **智慧等待**：提交 Ticker 後，會等待最多 60 秒，並每秒檢查一次結果是否載入，以提高穩定性。<br>- 處理檔案下載、重新命名和移動的邏輯。<br>- 將詳細操作過程記錄到 `Logger`。 |
 | `chrome_launcher.py` | (函式) | - 自動尋找 Chrome 安裝路徑。<br>- 建立/更新用於啟動偵錯模式的 `.lnk` 捷徑。<br>- 檢查偵錯埠是否被占用，若否，則嘗試啟動 Chrome。 |
 | `logger.py` | `logger` | - 設定全域日誌記錄器。<br>- **雙重輸出**：同時將日誌寫入 GUI 的文字方塊和根目錄的 `log.jsonl` 檔案。<br>- 使用 `JsonFormatter` 將檔案日誌格式化為 JSON Lines。 |
 | `settings.py` | (函式) | - 從 `user_settings.json` 載入使用者設定（如上次選擇的路徑）。<br>- 將新的使用者設定儲存回 JSON 檔案。 |
-| `config.py` | (無類別) | - 集中管理所有**靜態**設定，如 URL、埠號、逾時秒數等，方便修改。 |
-| `main.py` | (無類別) | - 作為程式的進入點，初始化 `Tkinter` 和 `TickerApp`，並啟動主事件循環。 |
+| `config.py` | (無類別) | - **動態路徑管理**：偵測執行環境 (PyInstaller 或 .py)，並提供正確的絕對基礎路徑 `BASE_DIR`。<br>- 集中管理所有**靜態**設定，如 URL、埠號、逾時秒數等。 |
+| `main.py` | `main()` | - 包含應用程式的主要啟動邏輯，由 `run.py` 呼叫。 |
 
 ## 5. 日誌記錄 (Logging)
 新版程式導入了全面的日誌系統，以便追蹤與除錯。
@@ -156,42 +155,24 @@ classDiagram
 ```mermaid
 sequenceDiagram
     participant User
+    participant run.py as Entrypoint
     participant GUI as TickerApp
     participant Launcher as ChromeLauncher
-    participant Logger
     participant Scraper as LietaScraper
-    participant Chrome
-    participant Lieta as lietaresearch.com
-
-    GUI->>Logger: 設定 GUI 日誌處理器
+    
+    User->>run.py: 執行程式
+    run.py->>GUI: 建立 TickerApp
     GUI->>Launcher: ensure_chrome_is_running()
-    Launcher->>Chrome: 檢查/啟動偵錯模式
     User->>GUI: 選擇 Ticker 檔案 & 目的地
     User->>GUI: 點擊「開始自動化」
     
-    GUI->>Scraper: 建立實例
-    GUI->>Scraper: 呼叫 run_automation() (in new thread)
-    
-    Scraper->>Logger: info("自動化開始")
-    Scraper->>Chrome: 附掛 WebDriver
+    GUI->>Scraper: 建立實例並在新執行緒中執行
     Scraper->>Lieta: 檢查登入狀態 (確認URL為/platform)
     
-    loop 每模型
-        Scraper->>Logger: info("切換到模型 X")
-        Scraper->>Lieta: 切換模型
-        loop 每 ticker
-            Scraper->>Logger: info("處理 Ticker Y")
-            Scraper->>Lieta: 輸入 Ticker + Submit
-            Scraper->>Lieta: 等待結果 (最多60秒，持續檢查)
-            alt 下載 HTML
-                Scraper->>Lieta: 點擊下載
-                Scraper->>Logger: info("成功儲存檔案")
-            else 抓取 TV Code
-                Scraper->>Lieta: 讀取文字
-                Scraper->>Logger: info("成功儲存 TV Code")
-            end
-        end
+    loop 每模型 & 每 Ticker
+        Scraper->>Lieta: 執行自動化操作...
     end
+    
     Scraper-->>GUI: 回報結果
     GUI-->>User: 顯示完成/錯誤訊息
 ```
@@ -221,3 +202,32 @@ sequenceDiagram
 | TV Code 取得 | `<p>` 元素，文字包含 Ticker | `By.XPATH, f"//p[contains(text(), '{ticker_upper}:')] "` |
 | 檢查登入狀態 | (無) 直接檢查 `driver.current_url` | `driver.current_url == config.LIETA_AUTOMATION_URL` |
 | 圖表載入完成 | `svg.main-svg` | `By.CSS_SELECTOR, 'svg.main-svg'` |
+
+## 10. 打包為執行檔 (.exe)
+
+為了方便非開發者使用，可以將此應用程式打包成單一的 `.exe` 執行檔。
+
+### 10.1. 安裝打包工具
+首先，需要安裝 PyInstaller：
+```bash
+pip install pyinstaller
+```
+
+### 10.2. 執行打包
+使用位於根目錄的 `run.py` 作為入口點來執行打包。`--hidden-import` 參數是為了確保所有必要的模組都被正確包含。
+
+在專案根目錄下執行以下指令：
+```bash
+pyinstaller --name LietaAutomator --onefile --windowed --icon=NONE ^
+--hidden-import=winshell ^
+--hidden-import=lieta_automator.chrome_launcher ^
+--hidden-import=lieta_automator.gui ^
+--hidden-import=lieta_automator.scraper ^
+--hidden-import=lieta_automator.settings ^
+--hidden-import=lieta_automator.logger ^
+--hidden-import=lieta_automator.config ^
+run.py
+```
+
+### 10.3. 找到執行檔
+打包完成後，您可以在專案根目錄下的 `dist` 資料夾中找到 `LietaAutomator.exe`。您可以將這個檔案連同 `automation_profile` 資料夾一起發布給使用者。
