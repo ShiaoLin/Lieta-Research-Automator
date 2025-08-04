@@ -12,13 +12,36 @@ else:
 
 # --- Chrome and Selenium Settings ---
 CHROME_EXECUTABLE_PATH = None # Set to a specific path if auto-detection fails
-REMOTE_DEBUGGING_PORT = 9222
-# Define paths as absolute paths based on BASE_DIR
-CHROME_USER_DATA_DIR = os.path.join(BASE_DIR, "automation_profile")
+# A list of ports to allow for concurrent Chrome instances.
+REMOTE_DEBUGGING_PORTS = [9222, 9223, 9224, 9225]
 SELENIUM_TIMEOUT = 10 # seconds
+
+def get_chrome_user_data_dir(port: int) -> str:
+    """
+    Generates a unique user data directory path for a given Chrome debugging port.
+    - Port 9222 (the default) uses 'automation_profile'.
+    - Subsequent ports (9223, 9224, ...) use 'automation_profile_2', '_3', etc.
+    """
+    if port == 9222:
+        profile_name = "automation_profile"
+    else:
+        # Calculate the suffix based on the port number offset from the base port
+        suffix = port - 9222 + 1
+        profile_name = f"automation_profile_{suffix}"
+        
+    return os.path.join(BASE_DIR, profile_name)
+
 
 # --- Application Settings ---
 LIETA_PLATFORM_URL = "https://www.lietaresearch.com/"
 LIETA_AUTOMATION_URL = "https://www.lietaresearch.com/platform"
-# Define temp download dir as an absolute path
+# Define main temp download dir
 TEMP_DOWNLOAD_DIR_NAME = os.path.join(BASE_DIR, "temp_downloads")
+
+def get_temp_download_path_for_port(port: int) -> str:
+    """
+    Generates a unique temporary download directory for a given port to avoid
+    race conditions in multi-window mode.
+    """
+    return os.path.join(TEMP_DOWNLOAD_DIR_NAME, str(port))
+

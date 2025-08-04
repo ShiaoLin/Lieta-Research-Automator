@@ -34,32 +34,25 @@ class JsonFormatter(logging.Formatter):
         
         return json.dumps(log_object, ensure_ascii=False)
 
+import queue
+
 # --- Custom Tkinter Handler ---
 class TkinterLogHandler(Handler):
     """
-    A logging handler that emits records to a Tkinter Text widget.
+    A logging handler that puts log records into a thread-safe queue.
+    The GUI thread is responsible for pulling records from the queue and
+    displaying them.
     """
-    def __init__(self, text_widget: tk.Text):
+    def __init__(self, log_queue: queue.Queue):
         super().__init__()
-        self.text_widget = text_widget
-        # Use a simple, human-readable format for the GUI
-        self.formatter = logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S')
+        self.log_queue = log_queue
 
     def emit(self, record: LogRecord):
-        if not self.text_widget.winfo_exists():
-            return
-            
-        msg = self.format(record)
-        
-        def append():
-            if not self.text_widget.winfo_exists():
-                return
-            self.text_widget.config(state="normal")
-            self.text_widget.insert(tk.END, msg + "\n")
-            self.text_widget.see(tk.END)
-            self.text_widget.config(state="disabled")
-        
-        self.text_widget.after(0, append)
+        """
+        Puts the log record into the queue.
+        No direct GUI manipulation happens here to ensure thread safety.
+        """
+        self.log_queue.put(record)
 
 # --- Setup Function ---
 def setup_logging():
