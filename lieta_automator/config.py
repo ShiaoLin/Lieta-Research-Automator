@@ -33,6 +33,7 @@ def get_chrome_user_data_dir(port: int) -> str:
 
 
 # --- Application Settings ---
+TASK_NAME = "LietaAutomatorDailyRun" # The name for the Windows Task Scheduler
 LIETA_PLATFORM_URL = "https://www.lietaresearch.com/"
 LIETA_AUTOMATION_URL = "https://www.lietaresearch.com/platform"
 # Define main temp download dir

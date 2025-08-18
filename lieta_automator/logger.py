@@ -3,12 +3,11 @@ import logging
 import os
 import tkinter as tk
 from logging import FileHandler, Handler, LogRecord
+from datetime import datetime
 
 from . import config # Import the config module
 
 # --- Configuration ---
-# Use the absolute path from the config module
-LOG_FILE_PATH = os.path.join(config.BASE_DIR, "log.jsonl")
 LOG_LEVEL = logging.INFO
 
 # --- Custom JSON Formatter ---
@@ -59,12 +58,8 @@ def setup_logging():
     """
     Configures the root logger for the application.
     - Clears existing handlers.
-    - Adds a JSON file handler.
+    - Adds a JSON file handler with a timestamp in the filename.
     """
-    # Clear previous log file if it exists
-    if os.path.exists(LOG_FILE_PATH):
-        os.remove(LOG_FILE_PATH)
-
     logger = logging.getLogger()
     logger.setLevel(LOG_LEVEL)
 
@@ -72,8 +67,13 @@ def setup_logging():
     if logger.hasHandlers():
         logger.handlers.clear()
 
+    # Generate a timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    log_filename = f"log_{timestamp}.jsonl"
+    log_file_path = os.path.join(config.BASE_DIR, log_filename)
+
     # Create and add the JSON file handler
-    file_handler = FileHandler(LOG_FILE_PATH, encoding="utf-8")
+    file_handler = FileHandler(log_file_path, encoding="utf-8")
     file_handler.setFormatter(JsonFormatter())
     logger.addHandler(file_handler)
 

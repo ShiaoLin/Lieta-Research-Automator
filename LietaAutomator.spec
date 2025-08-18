@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['winshell', 'lieta_automator.chrome_launcher', 'lieta_automator.gui', 'lieta_automator.scraper', 'lieta_automator.settings', 'lieta_automator.logger', 'lieta_automator.config'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='NONE',
+    uac_admin=True,
 )

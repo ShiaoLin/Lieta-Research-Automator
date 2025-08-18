@@ -12,7 +12,7 @@ from tkinter import Toplevel, filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import config, chrome_launcher, settings
+from . import config, chrome_launcher, settings, scheduler
 from .logger import TkinterLogHandler, logger
 from .scraper import LietaScraper
 
@@ -24,8 +24,8 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Research 自動化工具")
-        self.root.geometry("600x600") # Increased height for settings button
+        self.root.title("Lieta Research 自動化工具 v1.0.2")
+        self.root.geometry("600x650") # Increased height for settings and logs
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -65,7 +65,7 @@ class TickerApp:
                     logger.warning(f"無法刪除暫存項目 {item_path}: {e}")
         except Exception as e:
             logger.error(f"無法建立或存取暫存資料夾 {self.temp_download_path_base}: {e}", exc_info=True)
-            messagebox.showerror("嚴重錯誤", f"無法準備暫存資料夾，請檢查權限。\n\n{e}")
+            messagebox.showerror("嚴重錯誤", f"無法準備暫存資料夾，請檢查權限.\n\n{e}")
             self.root.destroy()
 
     def _setup_ui(self):
@@ -80,10 +80,13 @@ class TickerApp:
         top_frame.pack(fill="x", padx=10, pady=(5, 0))
         
         try:
-            self.settings_icon = ImageTk.PhotoImage(Image.open("setting.png").resize((24, 24), Image.Resampling.LANCZOS))
+            # Use BASE_DIR from config to create a reliable path
+            icon_path = os.path.join(config.BASE_DIR, "settings.png")
+            self.settings_icon = ImageTk.PhotoImage(Image.open(icon_path).resize((24, 24), Image.Resampling.LANCZOS))
             settings_button = ttk.Button(top_frame, image=self.settings_icon, command=self._open_settings_window)
             settings_button.pack(side="right")
-        except FileNotFoundError:
+        except Exception:
+            # Fallback if image fails to load
             settings_button = ttk.Button(top_frame, text="設定", command=self._open_settings_window)
             settings_button.pack(side="right")
 
@@ -103,58 +106,97 @@ class TickerApp:
     def _open_settings_window(self):
         settings_win = Toplevel(self.root)
         settings_win.title("設定")
-        settings_win.geometry("350x200")
+        settings_win.geometry("400x320")
         settings_win.transient(self.root)
         settings_win.grab_set()
+        settings_win.resizable(False, False)
 
         frame = ttk.Frame(settings_win, padding=15)
         frame.pack(fill="both", expand=True)
 
+        # --- General Settings ---
+        general_frame = ttk.LabelFrame(frame, text="通用設定", padding=10)
+        general_frame.pack(fill="x", pady=5)
+
         multi_window_var = tk.BooleanVar(value=self.user_settings.get("enable_multi_window", False))
-        multi_window_cb = ttk.Checkbutton(frame, text="啟用多視窗下載", variable=multi_window_var)
-        multi_window_cb.pack(anchor="w", pady=5)
+        multi_window_cb = ttk.Checkbutton(general_frame, text="啟用多視窗下載 (實驗性功能)", variable=multi_window_var)
+        multi_window_cb.pack(anchor="w")
 
-        scheduler_var = tk.BooleanVar(value=self.user_settings.get("enable_scheduler", False))
-        scheduler_cb = ttk.Checkbutton(frame, text="啟用自動排程", variable=scheduler_var)
-        scheduler_cb.pack(anchor="w", pady=5)
+        # --- Scheduler Settings ---
+        scheduler_frame = ttk.LabelFrame(frame, text="自動排程設定", padding=10)
+        scheduler_frame.pack(fill="x", pady=10)
 
+        schedule_enabled_var = tk.BooleanVar(value=self.user_settings.get("schedule_enabled", False))
+        
+        schedule_cb_frame = ttk.Frame(scheduler_frame)
+        schedule_cb_frame.pack(fill="x", anchor="w")
+        
+        schedule_cb = ttk.Checkbutton(schedule_cb_frame, text="啟用每日自動執行", variable=schedule_enabled_var)
+        schedule_cb.pack(side="left", anchor="w")
+        
+        admin_warning_label = ttk.Label(schedule_cb_frame, text="(需要系統管理員權限)", foreground="gray")
+        admin_warning_label.pack(side="left", anchor="w", padx=5)
+
+        time_frame = ttk.Frame(scheduler_frame)
+        time_frame.pack(fill="x", pady=(5, 0), padx=5)
+
+        # Hour selection
+        hours = [f"{h:02d}" for h in range(24)]
+        schedule_hour_var = tk.StringVar(value=self.user_settings.get("schedule_time_hour", "17"))
+        hour_combo = ttk.Combobox(time_frame, textvariable=schedule_hour_var, values=hours, width=5, state="readonly")
+        hour_combo.pack(side="left")
+        ttk.Label(time_frame, text=" 時").pack(side="left")
+
+        # Minute selection
+        minutes = [f"{m:02d}" for m in range(60)]
+        schedule_minute_var = tk.StringVar(value=self.user_settings.get("schedule_time_minute", "00"))
+        minute_combo = ttk.Combobox(time_frame, textvariable=schedule_minute_var, values=minutes, width=5, state="readonly")
+        minute_combo.pack(side="left", padx=(10, 0))
+        ttk.Label(time_frame, text=" 分").pack(side="left")
+
+        # --- Save/Cancel Buttons ---
         button_frame = ttk.Frame(frame)
         button_frame.pack(side="bottom", fill="x", pady=(20, 0))
 
         def save_and_close():
-            new_multi_window_setting = multi_window_var.get()
-            was_multi_window_enabled = self.user_settings.get("enable_multi_window", False)
+            # 1. Collect all settings from GUI
+            current_settings = settings.load_settings()
+            current_settings["enable_multi_window"] = multi_window_var.get()
+            current_settings["schedule_enabled"] = schedule_enabled_var.get()
+            current_settings["schedule_time_hour"] = schedule_hour_var.get()
+            current_settings["schedule_time_minute"] = schedule_minute_var.get()
 
-            # If multi-window is being disabled, clean up old profiles
-            if was_multi_window_enabled and not new_multi_window_setting:
-                logger.info("偵測到停用多視窗模式，正在清理舊的設定檔...")
-                # Start from the second port, as the first one is the default
-                for port in config.REMOTE_DEBUGGING_PORTS[1:]:
-                    profile_dir_to_delete = config.get_chrome_user_data_dir(port)
-                    if os.path.isdir(profile_dir_to_delete):
-                        try:
-                            shutil.rmtree(profile_dir_to_delete)
-                            logger.info(f"已成功刪除設定檔資料夾: {os.path.basename(profile_dir_to_delete)}")
-                        except Exception as e:
-                            logger.error(f"刪除資料夾 {os.path.basename(profile_dir_to_delete)} 時發生錯誤: {e}", exc_info=True)
+            # 2. Save to JSON file
+            settings.save_settings(current_settings)
+            self.user_settings = current_settings # Update app's current settings
+            logger.info("設定已儲存至 user_settings.json")
 
-            settings.save_setting("enable_multi_window", new_multi_window_setting)
+            # 3. Handle Windows Task Scheduler
+            # Since the app now requires admin rights to run, we don't need to check for is_admin() here.
+            try:
+                if schedule_enabled_var.get():
+                    schedule_time = f"{schedule_hour_var.get()}:{schedule_minute_var.get()}"
+                    success, message = scheduler.create_or_update_task(schedule_time)
+                else:
+                    success, message = scheduler.delete_task()
+
+                if success:
+                    logger.info(f"排程設定成功: {message}")
+                else:
+                    detailed_msg = f"排程設定失敗。原因: {message} (請確認您是以系統管理員身分執行本程式)"
+                    logger.error(detailed_msg)
+
+            except Exception as e:
+                logger.error(f"處理排程時發生未預期錯誤: {e}", exc_info=True)
             
-            if scheduler_var.get():
-                messagebox.showinfo("提示", "「自動排程」功能尚在規劃中，本次設定將不會儲存。", parent=settings_win)
-                settings.save_setting("enable_scheduler", False)
-            else:
-                settings.save_setting("enable_scheduler", False)
-
-            self.user_settings = settings.load_settings()
-            logger.info("設定已儲存。")
             settings_win.destroy()
 
-        save_button = ttk.Button(button_frame, text="儲存", command=save_and_close)
+        save_button = ttk.Button(button_frame, text="儲存並關閉", command=save_and_close)
         save_button.pack(side="right", padx=5)
 
         cancel_button = ttk.Button(button_frame, text="取消", command=settings_win.destroy)
         cancel_button.pack(side="right")
+
 
     def _setup_logging(self):
         tkinter_handler = TkinterLogHandler(self.log_queue)
@@ -252,7 +294,9 @@ class TickerApp:
         file_path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")], initialdir=initial_dir)
         if file_path:
             self._load_tickers_from_path(file_path)
-            settings.save_setting("last_ticker_path", file_path)
+            current_settings = settings.load_settings()
+            current_settings["last_ticker_path"] = file_path
+            settings.save_settings(current_settings)
             self.validate_inputs()
 
     def select_destination_path(self):
@@ -262,7 +306,9 @@ class TickerApp:
             self.destination_path = path
             self.dest_label.config(text=path)
             logger.info(f"設定儲存路徑: {path}")
-            settings.save_setting("last_destination_path", path)
+            current_settings = settings.load_settings()
+            current_settings["last_destination_path"] = path
+            settings.save_settings(current_settings)
             self.validate_inputs()
 
     def open_destination_folder(self):
@@ -283,19 +329,32 @@ class TickerApp:
             messagebox.showerror("錯誤", f"無法開啟資料夾.\n錯誤: {e}")
 
     def validate_inputs(self):
-        has_tickers = bool(self.tickers)
         has_dest = bool(self.destination_path and os.path.isdir(self.destination_path))
-        has_models = any(var.get() for var in self.selected_models.values())
-        is_valid = has_tickers and has_dest and has_models
         
-        if not self.automation_running:
-            self.start_button.config(state="normal" if is_valid else "disabled")
+        # The start button is always enabled. Validation happens on click.
+        self.start_button.config(state="normal")
         
         self.open_dest_button.config(state="normal" if has_dest else "disabled")
 
     def start_automation_thread(self):
         if self.automation_running:
             return
+        
+        # --- Input Validation ---
+        has_tickers = bool(self.tickers)
+        has_dest = bool(self.destination_path and os.path.isdir(self.destination_path))
+        selected_models = [model for model, var in self.selected_models.items() if var.get()]
+        has_models = bool(selected_models)
+
+        if not all([has_tickers, has_dest, has_models]):
+            if not has_tickers:
+                logger.error("自動化中止：未選擇 Ticker 檔案。")
+            if not has_dest:
+                logger.error("自動化中止：未選擇有效的儲存目的地。")
+            if not has_models:
+                logger.error("自動化中止：未選擇任何模型。")
+            return # Stop execution
+
         self.automation_running = True
         self.toggle_ui_state(False)
         
@@ -320,7 +379,9 @@ class TickerApp:
 
     def _run_multi_window_task(self):
         selected_models = [model for model, var in self.selected_models.items() if var.get()]
-        settings.save_setting("last_selected_models", selected_models)
+        current_settings = settings.load_settings()
+        current_settings["last_selected_models"] = selected_models
+        settings.save_settings(current_settings)
 
         if len(selected_models) > len(config.REMOTE_DEBUGGING_PORTS):
             msg = f"選擇的模型數量 ({len(selected_models)}) 超過可用埠號數量 ({len(config.REMOTE_DEBUGGING_PORTS)})。"
@@ -379,7 +440,9 @@ class TickerApp:
 
     def _run_single_window_task(self):
         selected_models = [model for model, var in self.selected_models.items() if var.get()]
-        settings.save_setting("last_selected_models", selected_models)
+        current_settings = settings.load_settings()
+        current_settings["last_selected_models"] = selected_models
+        settings.save_settings(current_settings)
         
         logger.info("--- 自動化開始 (單視窗模式) ---")
         
@@ -476,7 +539,6 @@ class TickerApp:
             unique_failures = sorted(list(set(failed_tickers)))
             summary_msg += f"\n\n失敗的項目 ({len(unique_failures)} 個):\n" + "\n".join(unique_failures)
         logger.info(f"任務總結: {summary_msg.replace('任務完成！', '').strip()}")
-        self.root.after(0, lambda: messagebox.showinfo("任務總結", summary_msg))
 
     def cleanup(self):
         try:
