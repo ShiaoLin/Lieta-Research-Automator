@@ -9,7 +9,7 @@ user_settings.json
 input.png
 
 # Logs and temporary files
-log.jsonl
+log_*.jsonl
 temp_downloads/
 
 # Python cache
@@ -20,3 +20,7 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Build artifacts
+build/
+dist/
