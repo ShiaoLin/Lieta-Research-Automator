@@ -5,7 +5,7 @@ a = Analysis(
     ['run.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('settings.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

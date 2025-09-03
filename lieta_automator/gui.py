@@ -24,8 +24,8 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Research 自動化工具 v1.0.2")
-        self.root.geometry("600x650") # Increased height for settings and logs
+        self.root.title("Lieta Research 自動化工具 v1.0.4") # Version Bump
+        self.root.geometry("600x650")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -47,11 +47,6 @@ class TickerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def _prepare_temp_dir(self):
-        """
-        Safely prepares the main temporary download directory.
-        It creates the base directory if it doesn't exist and clears any
-        subdirectories from previous runs.
-        """
         try:
             os.makedirs(self.temp_download_path_base, exist_ok=True)
             for item in os.listdir(self.temp_download_path_base):
@@ -80,13 +75,11 @@ class TickerApp:
         top_frame.pack(fill="x", padx=10, pady=(5, 0))
         
         try:
-            # Use BASE_DIR from config to create a reliable path
             icon_path = os.path.join(config.BASE_DIR, "settings.png")
             self.settings_icon = ImageTk.PhotoImage(Image.open(icon_path).resize((24, 24), Image.Resampling.LANCZOS))
             settings_button = ttk.Button(top_frame, image=self.settings_icon, command=self._open_settings_window)
             settings_button.pack(side="right")
         except Exception:
-            # Fallback if image fails to load
             settings_button = ttk.Button(top_frame, text="設定", command=self._open_settings_window)
             settings_button.pack(side="right")
 
@@ -104,99 +97,66 @@ class TickerApp:
         self._create_log_display_frame(main_frame)
 
     def _open_settings_window(self):
-        settings_win = Toplevel(self.root)
-        settings_win.title("設定")
-        settings_win.geometry("400x320")
-        settings_win.transient(self.root)
-        settings_win.grab_set()
-        settings_win.resizable(False, False)
+        # Pass a callback function to the dialog
+        dialog = SettingsDialog(self.root, self._handle_settings_close)
+        dialog.wait_window()
 
-        frame = ttk.Frame(settings_win, padding=15)
-        frame.pack(fill="both", expand=True)
+    def _handle_settings_close(self, new_settings):
+        """
+        Callback function that is executed when the SettingsDialog is closed.
+        All logic for saving and scheduling is now handled here.
+        """
+        if new_settings is None: # Window was closed without saving
+            logger.info("設定視窗已取消。")
+            return
 
-        # --- General Settings ---
-        general_frame = ttk.LabelFrame(frame, text="通用設定", padding=10)
-        general_frame.pack(fill="x", pady=5)
-
-        multi_window_var = tk.BooleanVar(value=self.user_settings.get("enable_multi_window", False))
-        multi_window_cb = ttk.Checkbutton(general_frame, text="啟用多視窗下載 (實驗性功能)", variable=multi_window_var)
-        multi_window_cb.pack(anchor="w")
-
-        # --- Scheduler Settings ---
-        scheduler_frame = ttk.LabelFrame(frame, text="自動排程設定", padding=10)
-        scheduler_frame.pack(fill="x", pady=10)
-
-        schedule_enabled_var = tk.BooleanVar(value=self.user_settings.get("schedule_enabled", False))
-        
-        schedule_cb_frame = ttk.Frame(scheduler_frame)
-        schedule_cb_frame.pack(fill="x", anchor="w")
-        
-        schedule_cb = ttk.Checkbutton(schedule_cb_frame, text="啟用每日自動執行", variable=schedule_enabled_var)
-        schedule_cb.pack(side="left", anchor="w")
-        
-        admin_warning_label = ttk.Label(schedule_cb_frame, text="(需要系統管理員權限)", foreground="gray")
-        admin_warning_label.pack(side="left", anchor="w", padx=5)
-
-        time_frame = ttk.Frame(scheduler_frame)
-        time_frame.pack(fill="x", pady=(5, 0), padx=5)
-
-        # Hour selection
-        hours = [f"{h:02d}" for h in range(24)]
-        schedule_hour_var = tk.StringVar(value=self.user_settings.get("schedule_time_hour", "17"))
-        hour_combo = ttk.Combobox(time_frame, textvariable=schedule_hour_var, values=hours, width=5, state="readonly")
-        hour_combo.pack(side="left")
-        ttk.Label(time_frame, text=" 時").pack(side="left")
-
-        # Minute selection
-        minutes = [f"{m:02d}" for m in range(60)]
-        schedule_minute_var = tk.StringVar(value=self.user_settings.get("schedule_time_minute", "00"))
-        minute_combo = ttk.Combobox(time_frame, textvariable=schedule_minute_var, values=minutes, width=5, state="readonly")
-        minute_combo.pack(side="left", padx=(10, 0))
-        ttk.Label(time_frame, text=" 分").pack(side="left")
-
-        # --- Save/Cancel Buttons ---
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(side="bottom", fill="x", pady=(20, 0))
-
-        def save_and_close():
-            # 1. Collect all settings from GUI
-            current_settings = settings.load_settings()
-            current_settings["enable_multi_window"] = multi_window_var.get()
-            current_settings["schedule_enabled"] = schedule_enabled_var.get()
-            current_settings["schedule_time_hour"] = schedule_hour_var.get()
-            current_settings["schedule_time_minute"] = schedule_minute_var.get()
-
-            # 2. Save to JSON file
-            settings.save_settings(current_settings)
-            self.user_settings = current_settings # Update app's current settings
+        try:
+            # 1. Update and save settings
+            self.user_settings.update(new_settings)
+            settings.save_settings(self.user_settings)
             logger.info("設定已儲存至 user_settings.json")
 
-            # 3. Handle Windows Task Scheduler
-            # Since the app now requires admin rights to run, we don't need to check for is_admin() here.
-            try:
-                if schedule_enabled_var.get():
-                    schedule_time = f"{schedule_hour_var.get()}:{schedule_minute_var.get()}"
-                    success, message = scheduler.create_or_update_task(schedule_time)
-                else:
+            # 2. Handle scheduling
+            schedule_enabled = self.user_settings.get('schedule_enabled', False)
+            schedule_time = self.user_settings.get('schedule_time', '17:00')
+            schedule_type = self.user_settings.get('schedule_type', 'DAILY')
+
+            if schedule_enabled:
+                if not scheduler.is_admin():
+                    raise PermissionError("需要系統管理員權限才能設定排程。")
+                
+                success, message = scheduler.create_or_update_task(schedule_time, schedule_type)
+                if not success:
+                    raise RuntimeError(f"排程設定失敗。原因: {message}")
+                logger.info(message)
+            else:
+                if scheduler.is_task_scheduled():
+                    if not scheduler.is_admin():
+                        raise PermissionError("需要系統管理員權限才能刪除排程。")
                     success, message = scheduler.delete_task()
+                    if not success:
+                        raise RuntimeError(f"取消排程失敗。原因: {message}")
+                    logger.info(message)
 
-                if success:
-                    logger.info(f"排程設定成功: {message}")
-                else:
-                    detailed_msg = f"排程設定失敗。原因: {message} (請確認您是以系統管理員身分執行本程式)"
-                    logger.error(detailed_msg)
+        except (PermissionError, RuntimeError) as e:
+            error_msg = str(e)
+            logger.error(error_msg)
+            self.log_message("ERROR", f"{error_msg} (請確認您是以系統管理員身分執行本程式)")
+        
+        except (IOError, OSError) as e:
+            error_msg = f"無法儲存設定檔: {e}"
+            logger.error(error_msg, exc_info=True)
+            self.log_message("ERROR", f"{error_msg} (請檢查程式是否有權限寫入 user_settings.json)")
+        
+        except Exception as e:
+            error_msg = f"處理設定時發生未預期錯誤: {e}"
+            logger.error(error_msg, exc_info=True)
+            self.log_message("ERROR", error_msg)
 
-            except Exception as e:
-                logger.error(f"處理排程時發生未預期錯誤: {e}", exc_info=True)
-            
-            settings_win.destroy()
-
-        save_button = ttk.Button(button_frame, text="儲存並關閉", command=save_and_close)
-        save_button.pack(side="right", padx=5)
-
-        cancel_button = ttk.Button(button_frame, text="取消", command=settings_win.destroy)
-        cancel_button.pack(side="right")
-
+    def log_message(self, level, message):
+        """Helper to log messages from other dialogs to the main UI."""
+        numeric_level = logging.getLevelName(level.upper())
+        logger.log(numeric_level, message)
 
     def _setup_logging(self):
         tkinter_handler = TkinterLogHandler(self.log_queue)
@@ -330,30 +290,23 @@ class TickerApp:
 
     def validate_inputs(self):
         has_dest = bool(self.destination_path and os.path.isdir(self.destination_path))
-        
-        # The start button is always enabled. Validation happens on click.
         self.start_button.config(state="normal")
-        
         self.open_dest_button.config(state="normal" if has_dest else "disabled")
 
     def start_automation_thread(self):
         if self.automation_running:
             return
         
-        # --- Input Validation ---
         has_tickers = bool(self.tickers)
         has_dest = bool(self.destination_path and os.path.isdir(self.destination_path))
         selected_models = [model for model, var in self.selected_models.items() if var.get()]
         has_models = bool(selected_models)
 
         if not all([has_tickers, has_dest, has_models]):
-            if not has_tickers:
-                logger.error("自動化中止：未選擇 Ticker 檔案。")
-            if not has_dest:
-                logger.error("自動化中止：未選擇有效的儲存目的地。")
-            if not has_models:
-                logger.error("自動化中止：未選擇任何模型。")
-            return # Stop execution
+            if not has_tickers: logger.error("自動化中止：未選擇 Ticker 檔案。")
+            if not has_dest: logger.error("自動化中止：未選擇有效的儲存目的地。")
+            if not has_models: logger.error("自動化中止：未選擇任何模型。")
+            return
 
         self.automation_running = True
         self.toggle_ui_state(False)
@@ -371,7 +324,7 @@ class TickerApp:
         except Exception as e:
             logger.critical(f"自動化過程中發生未預期的嚴重錯誤: {e}", exc_info=True)
             if self.root.winfo_exists():
-                self.root.after(0, lambda: messagebox.showerror("嚴重錯誤", f"自動化過程中發生嚴重錯誤，請查看 log.jsonl。\n\n{e}"))
+                self.root.after(0, lambda: messagebox.showerror("嚴重錯誤", f"自動化過程中發生嚴重錯誤，請查看 log.jsonl.\n\n{e}"))
         finally:
             if self.root.winfo_exists():
                 self.automation_running = False
@@ -386,26 +339,20 @@ class TickerApp:
         if len(selected_models) > len(config.REMOTE_DEBUGGING_PORTS):
             msg = f"選擇的模型數量 ({len(selected_models)}) 超過可用埠號數量 ({len(config.REMOTE_DEBUGGING_PORTS)})。"
             logger.error(msg)
-            self.root.after(0, lambda: messagebox.showerror("錯誤", msg))
+            # self.root.after(0, lambda: messagebox.showerror("錯誤", msg)) # This line is removed
             return
 
         logger.info("--- 自動化開始 (多視窗模式) ---")
         
-        # --- Phase 1: Prepare all profiles BEFORE launching any Chrome instances ---
         logger.info("階段 1: 準備並同步所有 Chrome 設定檔...")
         profiles_to_launch = []
         for i, model in enumerate(selected_models):
             port = config.REMOTE_DEBUGGING_PORTS[i]
             user_data_dir = config.get_chrome_user_data_dir(port)
             profiles_to_launch.append({'port': port, 'user_data_dir': user_data_dir, 'model': model})
-            
-            # This will create the directory and copy files from the main profile if it's the first time.
-            # We do this for all profiles before any Chrome process is started to avoid file locks.
             chrome_launcher._sync_profile_if_new(port, user_data_dir)
         logger.info("所有設定檔準備完成。")
 
-
-        # --- Phase 2: Launch Chrome instances and run automation tasks ---
         logger.info("階段 2: 啟動 Chrome 實例並執行自動化任務...")
         self.scrapers = []
         threads = []
@@ -422,7 +369,7 @@ class TickerApp:
             )
             threads.append(thread)
             thread.start()
-            time.sleep(1) # Stagger the launch slightly
+            time.sleep(1)
 
         for thread in threads:
             thread.join()
@@ -437,6 +384,32 @@ class TickerApp:
         
         if self.root.winfo_exists():
             self.show_summary(total_tasks, all_failed_tickers)
+
+    def _run_single_model_task(self, scraper, tickers, model, dest_path, port, user_data_dir):
+        try:
+            if not chrome_launcher.launch_chrome_in_debug_mode(port, user_data_dir):
+                raise Exception(f"[Port {port}] 無法啟動 Chrome 偵錯實例。")
+            
+            logger.info(f"[Port {port}] 等待 Chrome 啟動...")
+            time.sleep(5)
+
+            if not scraper.setup_driver():
+                raise Exception(f"[Port {port}] 無法連接到 WebDriver。")
+
+            if not scraper.check_login_status():
+                if port == config.REMOTE_DEBUGGING_PORTS[0]:
+                     logger.error("使用者未登入。請先登入 Lieta Research 網站後再開始自動化。")
+                raise Exception(f"[Port {port}] 使用者未登入。")
+
+            logger.info(f"[Port {port}] WebDriver 設定成功，開始執行任務。")
+            scraper.run_automation(tickers, model, dest_path)
+
+        except Exception as e:
+            logger.error(f"處理模型 {model} 時發生錯誤: {e}", exc_info=True)
+            scraper.failed_tickers.extend([f"{t} ({model})" for t in tickers])
+        finally:
+            if scraper.driver:
+                scraper.close_driver()
 
     def _run_single_window_task(self):
         selected_models = [model for model, var in self.selected_models.items() if var.get()]
@@ -463,7 +436,7 @@ class TickerApp:
                 raise Exception("無法連接到 WebDriver。")
 
             if not scraper.check_login_status():
-                self.root.after(0, lambda: messagebox.showerror("需要登入", "請先登入 Lieta Research 網站後再開始自動化。"))
+                logger.error("使用者未登入。請先登入 Lieta Research 網站後再開始自動化。")
                 raise Exception("使用者未登入。")
 
             all_failed_tickers = []
@@ -477,34 +450,9 @@ class TickerApp:
 
         except Exception as e:
             logger.error(f"單視窗模式執行失敗: {e}", exc_info=True)
-            if self.root.winfo_exists():
-                self.root.after(0, lambda msg=str(e): messagebox.showerror("錯誤", f"自動化執行失敗: {msg}"))
-        finally:
-            if scraper.driver:
-                scraper.close_driver()
-
-    def _run_single_model_task(self, scraper, tickers, model, dest_path, port, user_data_dir):
-        try:
-            if not chrome_launcher.launch_chrome_in_debug_mode(port, user_data_dir):
-                raise Exception(f"[Port {port}] 無法啟動 Chrome 偵錯實例。")
-            
-            logger.info(f"[Port {port}] 等待 Chrome 啟動...")
-            time.sleep(5)
-
-            if not scraper.setup_driver():
-                raise Exception(f"[Port {port}] 無法連接到 WebDriver。")
-
-            if not scraper.check_login_status():
-                if port == config.REMOTE_DEBUGGING_PORTS[0]:
-                     self.root.after(0, lambda: messagebox.showerror("需要登入", "請先登入 Lieta Research 網站後再開始自動化。"))
-                raise Exception(f"[Port {port}] 使用者未登入。")
-
-            logger.info(f"[Port {port}] WebDriver 設定成功，開始執行任務。")
-            scraper.run_automation(tickers, model, dest_path)
-
-        except Exception as e:
-            logger.error(f"處理模型 {model} 時發生錯誤: {e}", exc_info=True)
-            scraper.failed_tickers.extend([f"{t} ({model})" for t in tickers])
+            # The following messagebox is removed as the error is already logged.
+            # if self.root.winfo_exists():
+            #     self.root.after(0, lambda msg=str(e): messagebox.showerror("錯誤", f"自動化執行失敗: {msg}"))
         finally:
             if scraper.driver:
                 scraper.close_driver()
@@ -549,64 +497,143 @@ class TickerApp:
             logger.warning(f"無法自動刪除暫存資料夾: {e}", exc_info=True)
 
     def _kill_chrome_processes(self):
-        if sys.platform != "win32":
-            return
-        
+        if sys.platform != "win32": return
         logger.info("正在嘗試關閉由本程式啟動的 Chrome 偵錯視窗...")
         ports_to_check = [scraper.port for scraper in self.scrapers if scraper.port]
-        if not ports_to_check:
-            return
+        if not ports_to_check: return
 
         try:
-            # Find PIDs for all relevant ports first
             pids_to_kill = set()
             cmd = "netstat -aon"
             result = subprocess.check_output(cmd, shell=True, text=True, encoding='utf-8', errors='ignore')
             
             for port in ports_to_check:
-                # Regex to find a line with the listening port and capture the PID
                 match = re.search(r'TCP\s+127\.0\.0\.1:' + str(port) + r'\s+.*?\s+LISTENING\s+(\d+)', result)
                 if match:
-                    pid = match.group(1)
-                    pids_to_kill.add(pid)
-                    logger.info(f"找到 Port {port} 對應的 PID: {pid}")
-
-            # Kill all found PIDs
-            if not pids_to_kill:
-                logger.info("未找到需要關閉的 Chrome 程序。")
-                return
+                    pids_to_kill.add(match.group(1))
+            
+            if not pids_to_kill: return
 
             for pid in pids_to_kill:
                 try:
-                    # Use capture_output to prevent taskkill output from polluting the console
                     subprocess.run(f"taskkill /F /PID {pid}", shell=True, check=True, capture_output=True)
                     logger.info(f"已成功終止 PID: {pid}")
-                except subprocess.CalledProcessError as e:
-                    # This might happen if the process was already closed, which is fine.
-                    logger.warning(f"終止 PID {pid} 失敗 (可能已關閉): {e.stderr.decode('cp950', errors='ignore').strip()}")
-
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            logger.error(f"執行系統指令時發生錯誤: {e}")
+                except subprocess.CalledProcessError:
+                    pass
         except Exception as e:
             logger.error(f"關閉 Chrome 程序時發生未預期錯誤: {e}", exc_info=True)
 
-
     def on_closing(self, force_close=False):
-        if self.automation_running:
-            if not messagebox.askokcancel("警告", "自動化正在執行中，確定要強制關閉程式嗎?"):
-                return
+        if self.automation_running and not messagebox.askokcancel("警告", "自動化正在執行中，確定要強制關閉程式嗎？"):
+            return
         
-        if force_close or messagebox.askokcancel("結束", "確定要關閉程式嗎?"):
+        if force_close or messagebox.askokcancel("結束", "確定要關閉程式嗎？"):
             logger.info("正在關閉應用程式...")
             self.automation_running = False
-            
-            # First, try to gracefully quit drivers
             for scraper in self.scrapers:
-                if scraper.driver:
-                    scraper.close_driver()
-            
-            # Then, forcefully kill any remaining Chrome processes we started
+                if scraper.driver: scraper.close_driver()
             self._kill_chrome_processes()
-
             self.cleanup()
             self.root.destroy()
+
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent, on_close_callback):
+        super().__init__(parent)
+        self.parent = parent
+        self.on_close_callback = on_close_callback
+        self.transient(parent)
+        self.title("設定")
+        self.geometry("450x400")
+        self.resizable(False, False)
+
+        self.settings = settings.load_settings()
+
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(expand=True, fill="both")
+
+        # --- General Settings ---
+        general_frame = ttk.LabelFrame(main_frame, text="通用設定", padding=10)
+        general_frame.pack(fill="x", pady=5)
+
+        self.multi_window_var = tk.BooleanVar(value=self.settings.get("enable_multi_window", False))
+        multi_window_cb = ttk.Checkbutton(general_frame, text="啟用多視窗下載 (實驗性功能)", variable=self.multi_window_var)
+        multi_window_cb.pack(anchor="w")
+
+        # --- Scheduler Settings ---
+        scheduler_frame = ttk.LabelFrame(main_frame, text="自動排程設定", padding=10)
+        scheduler_frame.pack(fill="x", pady=10)
+
+        self.schedule_enabled_var = tk.BooleanVar()
+        self.schedule_check = ttk.Checkbutton(scheduler_frame, text="啟用自動執行", variable=self.schedule_enabled_var, command=self.toggle_schedule_widgets)
+        self.schedule_check.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        
+        admin_warning_label = ttk.Label(scheduler_frame, text="(需要系統管理員權限)", foreground="gray")
+        admin_warning_label.grid(row=0, column=1, columnspan=2, sticky="w", padx=(100, 0))
+
+        self.schedule_type_var = tk.StringVar()
+        self.daily_radio = ttk.Radiobutton(scheduler_frame, text="每日", variable=self.schedule_type_var, value="DAILY")
+        self.weekdays_radio = ttk.Radiobutton(scheduler_frame, text="週一至週五", variable=self.schedule_type_var, value="WEEKDAYS")
+        self.daily_radio.grid(row=1, column=0, sticky="w", padx=(15, 0))
+        self.weekdays_radio.grid(row=1, column=1, sticky="w")
+
+        time_label = ttk.Label(scheduler_frame, text="執行時間 (24小時制):")
+        time_label.grid(row=2, column=0, sticky="w", pady=(10, 0), padx=(15,0))
+
+        self.hour_var = tk.StringVar()
+        self.hour_combo = ttk.Combobox(scheduler_frame, textvariable=self.hour_var, values=[f"{h:02d}" for h in range(24)], width=5, state="readonly")
+        self.hour_combo.grid(row=3, column=0, sticky="w", padx=(15,0))
+
+        colon_label = ttk.Label(scheduler_frame, text=":")
+        colon_label.grid(row=3, column=1, sticky="w", padx=5)
+
+        self.minute_var = tk.StringVar()
+        self.minute_combo = ttk.Combobox(scheduler_frame, textvariable=self.minute_var, values=[f"{m:02d}" for m in range(60)], width=5, state="readonly")
+        self.minute_combo.grid(row=3, column=2, sticky="w")
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(side="bottom", fill="x", pady=(20, 0))
+
+        self.save_button = ttk.Button(button_frame, text="儲存並關閉", command=self.save_and_close)
+        self.save_button.pack(side="right", padx=5)
+
+        self.cancel_button = ttk.Button(button_frame, text="取消", command=self.cancel_and_close)
+        self.cancel_button.pack(side="right")
+        
+        self.load_settings_to_ui()
+        self.toggle_schedule_widgets()
+        
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.cancel_and_close)
+
+    def load_settings_to_ui(self):
+        self.multi_window_var.set(self.settings.get('enable_multi_window', False))
+        self.schedule_enabled_var.set(self.settings.get('schedule_enabled', False))
+        schedule_time = self.settings.get('schedule_time', '17:00')
+        hour, minute = schedule_time.split(':')
+        self.hour_var.set(hour)
+        self.minute_var.set(minute)
+        self.schedule_type_var.set(self.settings.get('schedule_type', 'DAILY'))
+
+    def toggle_schedule_widgets(self):
+        is_enabled = self.schedule_enabled_var.get()
+        state = "normal" if is_enabled else "disabled"
+        self.hour_combo.config(state=state if is_enabled else "readonly")
+        self.minute_combo.config(state=state if is_enabled else "readonly")
+        self.daily_radio.config(state=state)
+        self.weekdays_radio.config(state=state)
+
+    def save_and_close(self):
+        """Collects data from UI and passes it to the callback."""
+        new_settings = {
+            'enable_multi_window': self.multi_window_var.get(),
+            'schedule_enabled': self.schedule_enabled_var.get(),
+            'schedule_time': f"{self.hour_var.get()}:{self.minute_var.get()}",
+            'schedule_type': self.schedule_type_var.get()
+        }
+        self.on_close_callback(new_settings)
+        self.destroy()
+
+    def cancel_and_close(self):
+        """Closes the window and signals no changes were made."""
+        self.on_close_callback(None)
+        self.destroy()

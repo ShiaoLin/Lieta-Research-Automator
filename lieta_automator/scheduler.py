@@ -52,12 +52,13 @@ def is_task_scheduled():
         # 如果任務不存在，schtasks 會返回非零的退出碼
         return False
 
-def create_or_update_task(schedule_time: str):
+def create_or_update_task(schedule_time: str, schedule_type: str = 'DAILY'):
     """
     建立或更新 Windows 排程工作。
     此操作需要系統管理員權限。
 
     :param schedule_time: 排程時間，格式為 "HH:MM"
+    :param schedule_type: 排程類型 ('DAILY' 或 'WEEKDAYS')
     :return: (bool, str) 表示成功與否以及對應的訊息
     """
     if not is_admin():
@@ -67,39 +68,67 @@ def create_or_update_task(schedule_time: str):
 
     executable_path = _get_run_script_path()
     
-    # 正確的 /TR 格式應該是 ""C:\path\to\program.exe" --argument1"
-    # 將可執行檔路徑和其參數一起作為一個字串傳遞給 /TR
+    # /TR 參數需要將執行檔路徑和其自身的參數視為一個單一的字串。
+    # 格式: /TR "'C:\path\to\program.exe' --argument"
     task_run_command = f'"{executable_path}" --run-automated'
 
-    # 組建命令。使用 shell=True 時，將整個命令組合成一個字串是可靠的方式。
-    # 確保 TASK_NAME 也被引號包圍。
-    command = (
-        f'schtasks /Create /TN "{TASK_NAME}" '
-        f'/TR "{task_run_command}" '
-        f'/SC DAILY /ST {schedule_time} /F /RL HIGHEST'
-    )
+    # 基礎命令
+    command = [
+        'schtasks', '/Create',
+        '/TN', TASK_NAME,
+        '/TR', task_run_command, # 傳遞組合好的完整命令
+    ]
+
+    # 根據排程類型添加對應的參數
+    if schedule_type == 'WEEKDAYS':
+        command.extend(['/SC', 'WEEKLY', '/D', 'MON,TUE,WED,THU,FRI'])
+        schedule_text = f"每週一至週五 {schedule_time}"
+    else: # 預設為 DAILY
+        command.extend(['/SC', 'DAILY'])
+        schedule_text = f"每天 {schedule_time}"
+
+    # 加上剩餘的通用參數
+    command.extend(['/ST', schedule_time, '/F', '/RL', 'HIGHEST'])
     
     try:
-        logger.info(f"正在建立或更新排程工作 '{TASK_NAME}'，時間: {schedule_time}")
-        logger.debug(f"執行 schtasks 命令: {command}")
+        logger.info(f"正在建立或更新排程工作 '{TASK_NAME}'，時間: {schedule_time}，類型: {schedule_type}")
+        logger.debug(f"執行 schtasks 命令: {' '.join(command)}")
         
-        subprocess.run(
+        # 移除 check=True，手動處理回傳結果以便詳盡記錄
+        result = subprocess.run(
             command,
-            check=True,
-            shell=True,
             capture_output=True,
             text=True,
-            encoding='cp950'
+            encoding='cp950',
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
-        logger.info(f"成功設定排程工作 '{TASK_NAME}'")
-        return True, f"成功設定排程於每天 {schedule_time}"
-    except subprocess.CalledProcessError as e:
-        error_message = e.stderr.strip()
-        if not error_message:
-            error_message = e.stdout.strip()
+
+        # 無論成功或失敗，都記錄輸出
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
         
+        if stdout:
+            logger.info(f"schtasks STDOUT: {stdout}")
+        if stderr:
+            logger.warning(f"schtasks STDERR: {stderr}")
+
+        # 手動檢查回傳碼
+        if result.returncode != 0:
+            error_message = stderr if stderr else stdout
+            raise subprocess.CalledProcessError(result.returncode, command, output=stdout, stderr=stderr)
+
+        logger.info(f"成功設定排程工作 '{TASK_NAME}'")
+        return True, f"成功設定排程於{schedule_text}"
+        
+    except subprocess.CalledProcessError as e:
+        error_message = e.stderr.strip() if e.stderr else str(e)
         final_msg = f"設定排程失敗: {error_message}"
         logger.error(final_msg)
+        return False, final_msg
+    except Exception as e:
+        # 捕捉其他非預期的錯誤
+        final_msg = f"設定排程時發生未預期錯誤: {e}"
+        logger.error(final_msg, exc_info=True)
         return False, final_msg
 
 
@@ -119,17 +148,17 @@ def delete_task():
         logger.info("排程工作不存在，無需刪除。" )
         return True, "排程本來就不存在。"
 
-    command = f'schtasks /Delete /TN "{TASK_NAME}" /F'
+    command = ['schtasks', '/Delete', '/TN', TASK_NAME, '/F']
     
     try:
         logger.info(f"正在刪除排程工作 '{TASK_NAME}'")
         subprocess.run(
             command,
             check=True,
-            shell=True,
             capture_output=True,
             text=True,
-            encoding='cp950'
+            encoding='cp950',
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
         logger.info(f"成功刪除排程工作 '{TASK_NAME}'")
         return True, "已成功取消自動排程。"
