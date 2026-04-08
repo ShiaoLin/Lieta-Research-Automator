@@ -1,4 +1,5 @@
 import os
+import re
 import socket
 import subprocess
 import winreg
@@ -6,37 +7,109 @@ import shutil
 from . import config
 from .logger import logger
 
+def _copy_tree_ignore_locked(src: str, dst: str):
+    """
+    Recursively copies a directory tree from src to dst, silently skipping
+    any files that are locked by another process (e.g., Chrome's Cookies file).
+    Returns a list of files that could not be copied.
+    """
+    skipped = []
+    os.makedirs(dst, exist_ok=True)
+    for item in os.scandir(src):
+        s = item.path
+        d = os.path.join(dst, item.name)
+        if item.is_dir():
+            child_skipped = _copy_tree_ignore_locked(s, d)
+            skipped.extend(child_skipped)
+        else:
+            try:
+                shutil.copy2(s, d)
+            except OSError:
+                skipped.append(s)
+    return skipped
+
+
+def kill_all_debug_chrome_instances():
+    """
+    Kills all Chrome processes listening on the configured debug ports.
+    Called before multi-window sync so profile files are not locked.
+    """
+    try:
+        result = subprocess.check_output(
+            'netstat -aon', shell=True, text=True, encoding='utf-8', errors='ignore'
+        )
+        pids = set()
+        for port in config.REMOTE_DEBUGGING_PORTS:
+            m = re.search(
+                r'TCP\s+127\.0\.0\.1:' + str(port) + r'\s+.*?LISTENING\s+(\d+)', result
+            )
+            if m:
+                pids.add(m.group(1))
+        for pid in pids:
+            subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
+            logger.info(f"已關閉佔用偵錯 port 的 Chrome 程序 (PID {pid})。")
+    except Exception as e:
+        logger.warning(f"嘗試關閉 Chrome 程序時發生錯誤: {e}")
+
+
+def sync_all_secondary_profiles():
+    """
+    Syncs all secondary Chrome profiles from the primary profile.
+    Must be called while NO Chrome debug instances are running so that
+    the primary profile's Cookies file is not locked.
+    """
+    source_profile_dir = config.get_chrome_user_data_dir(config.REMOTE_DEBUGGING_PORTS[0])
+    if not os.path.exists(source_profile_dir):
+        logger.warning("主 Profile 資料夾不存在，跳過同步。")
+        return
+
+    for port in config.REMOTE_DEBUGGING_PORTS[1:]:
+        dest_profile_dir = config.get_chrome_user_data_dir(port)
+        # Remove stale sync marker so we always do a fresh sync.
+        sync_marker = os.path.join(dest_profile_dir, ".profile_synced")
+        if os.path.exists(sync_marker):
+            os.remove(sync_marker)
+
+        logger.info(f"正在同步 Profile → {os.path.basename(dest_profile_dir)}...")
+        os.makedirs(dest_profile_dir, exist_ok=True)
+        skipped = _copy_tree_ignore_locked(source_profile_dir, dest_profile_dir)
+
+        with open(sync_marker, 'w') as f:
+            f.write("synced")
+
+        if skipped:
+            logger.warning(
+                f"Profile '{os.path.basename(dest_profile_dir)}' 同步時跳過 {len(skipped)} 個鎖定檔案: "
+                + ", ".join(os.path.basename(p) for p in skipped)
+            )
+        else:
+            logger.info(f"Profile '{os.path.basename(dest_profile_dir)}' 同步完成。")
+
+
 def _sync_profile_if_new(port: int, dest_profile_dir: str):
     """
-    If this is the first time a secondary profile is being used, sync the primary
-    profile's data to it to ensure a consistent state (logins, extensions, etc.).
+    Legacy per-port sync used by single-window mode.
+    For multi-window mode, call sync_all_secondary_profiles() instead.
     """
-    # This logic only applies to secondary profiles (not the main one)
     if port == config.REMOTE_DEBUGGING_PORTS[0]:
         return
 
     source_profile_dir = config.get_chrome_user_data_dir(config.REMOTE_DEBUGGING_PORTS[0])
     sync_marker_file = os.path.join(dest_profile_dir, ".profile_synced")
 
-    # Check if the source profile exists and the destination has not been synced before
     if os.path.exists(source_profile_dir) and not os.path.exists(sync_marker_file):
-        logger.info(f"檢測到新的 Profile 資料夾: {os.path.basename(dest_profile_dir)}。正在從主 Profile 同步設定...")
-        
-        # Ensure the destination directory exists before copying
+        logger.info(f"檢測到新的 Profile: {os.path.basename(dest_profile_dir)}，正在同步...")
         os.makedirs(dest_profile_dir, exist_ok=True)
-        
-        try:
-            # Copy the entire directory tree, overwriting existing files.
-            # dirs_exist_ok=True is crucial for copying into an existing folder.
-            shutil.copytree(source_profile_dir, dest_profile_dir, dirs_exist_ok=True)
-            
-            # Create a marker file to indicate that the sync is complete
-            with open(sync_marker_file, 'w') as f:
-                f.write("synced")
+        skipped = _copy_tree_ignore_locked(source_profile_dir, dest_profile_dir)
+        with open(sync_marker_file, 'w') as f:
+            f.write("synced")
+        if skipped:
+            logger.warning(
+                f"Profile '{os.path.basename(dest_profile_dir)}' 同步完成，跳過 {len(skipped)} 個鎖定檔案: "
+                + ", ".join(os.path.basename(p) for p in skipped)
+            )
+        else:
             logger.info(f"Profile '{os.path.basename(dest_profile_dir)}' 同步成功。")
-
-        except Exception as e:
-            logger.error(f"從 '{source_profile_dir}' 同步至 '{dest_profile_dir}' 時發生錯誤: {e}", exc_info=True)
 
 
 def find_chrome_executable():
@@ -76,10 +149,8 @@ def launch_chrome_in_debug_mode(port: int, user_data_dir: str):
     Ensures a Chrome instance is running in debug mode on a specific port
     with a specific user data directory.
     If the port is not in use, it launches a new Chrome instance.
+    Profile syncing must be done before calling this (via sync_all_secondary_profiles).
     """
-    # Before launching, sync the profile from the main one if it's a new profile
-    _sync_profile_if_new(port, user_data_dir)
-
     logger.info(f"正在檢查 Port {port}...")
     if is_port_in_use(port):
         logger.info(f"Port {port} 已被占用，假設對應的 Chrome 偵錯模式已在執行。")

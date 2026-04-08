@@ -5,22 +5,35 @@ automation_profile*/
 # User-specific settings and data
 user_settings.json
 *.txt
+!requirements.txt
 *.lnk
-input.png
+
+# Screenshots and images (settings.png is a committed UI asset)
+*.png
+!settings.png
 
 # Logs and temporary files
-log_*.jsonl
+*.jsonl
 temp_downloads/
 
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
 
 # IDE/OS specific
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
 
 # Build artifacts
 build/
 dist/
+*.egg-info/
+
+# AI assistant internal files
+.claude/
+.gemini/
+GEMINI.md
+GEMINI.utf8.md

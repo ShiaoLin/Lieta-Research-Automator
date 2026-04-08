@@ -12,7 +12,7 @@ from tkinter import Toplevel, filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import config, chrome_launcher, settings, scheduler
+from . import config, chrome_launcher, settings
 from .logger import TkinterLogHandler, logger
 from .scraper import LietaScraper
 
@@ -102,52 +102,18 @@ class TickerApp:
         dialog.wait_window()
 
     def _handle_settings_close(self, new_settings):
-        """
-        Callback function that is executed when the SettingsDialog is closed.
-        All logic for saving and scheduling is now handled here.
-        """
-        if new_settings is None: # Window was closed without saving
+        """Callback executed when SettingsDialog is closed."""
+        if new_settings is None:
             logger.info("設定視窗已取消。")
             return
-
         try:
-            # 1. Update and save settings
             self.user_settings.update(new_settings)
             settings.save_settings(self.user_settings)
             logger.info("設定已儲存至 user_settings.json")
-
-            # 2. Handle scheduling
-            schedule_enabled = self.user_settings.get('schedule_enabled', False)
-            schedule_time = self.user_settings.get('schedule_time', '17:00')
-            schedule_type = self.user_settings.get('schedule_type', 'DAILY')
-
-            if schedule_enabled:
-                if not scheduler.is_admin():
-                    raise PermissionError("需要系統管理員權限才能設定排程。")
-                
-                success, message = scheduler.create_or_update_task(schedule_time, schedule_type)
-                if not success:
-                    raise RuntimeError(f"排程設定失敗。原因: {message}")
-                logger.info(message)
-            else:
-                if scheduler.is_task_scheduled():
-                    if not scheduler.is_admin():
-                        raise PermissionError("需要系統管理員權限才能刪除排程。")
-                    success, message = scheduler.delete_task()
-                    if not success:
-                        raise RuntimeError(f"取消排程失敗。原因: {message}")
-                    logger.info(message)
-
-        except (PermissionError, RuntimeError) as e:
-            error_msg = str(e)
-            logger.error(error_msg)
-            self.log_message("ERROR", f"{error_msg} (請確認您是以系統管理員身分執行本程式)")
-        
         except (IOError, OSError) as e:
             error_msg = f"無法儲存設定檔: {e}"
             logger.error(error_msg, exc_info=True)
-            self.log_message("ERROR", f"{error_msg} (請檢查程式是否有權限寫入 user_settings.json)")
-        
+            self.log_message("ERROR", error_msg)
         except Exception as e:
             error_msg = f"處理設定時發生未預期錯誤: {e}"
             logger.error(error_msg, exc_info=True)
@@ -344,13 +310,15 @@ class TickerApp:
 
         logger.info("--- 自動化開始 (多視窗模式) ---")
         
-        logger.info("階段 1: 準備並同步所有 Chrome 設定檔...")
+        logger.info("階段 1: 關閉所有偵錯 Chrome 並同步所有 Profile（確保 Cookies 可複製）...")
+        chrome_launcher.kill_all_debug_chrome_instances()
+        chrome_launcher.sync_all_secondary_profiles()
+
         profiles_to_launch = []
         for i, model in enumerate(selected_models):
             port = config.REMOTE_DEBUGGING_PORTS[i]
             user_data_dir = config.get_chrome_user_data_dir(port)
             profiles_to_launch.append({'port': port, 'user_data_dir': user_data_dir, 'model': model})
-            chrome_launcher._sync_profile_if_new(port, user_data_dir)
         logger.info("所有設定檔準備完成。")
 
         logger.info("階段 2: 啟動 Chrome 實例並執行自動化任務...")
@@ -543,7 +511,7 @@ class SettingsDialog(tk.Toplevel):
         self.on_close_callback = on_close_callback
         self.transient(parent)
         self.title("設定")
-        self.geometry("450x400")
+        self.geometry("450x180")
         self.resizable(False, False)
 
         self.settings = settings.load_settings()
@@ -559,37 +527,6 @@ class SettingsDialog(tk.Toplevel):
         multi_window_cb = ttk.Checkbutton(general_frame, text="啟用多視窗下載 (實驗性功能)", variable=self.multi_window_var)
         multi_window_cb.pack(anchor="w")
 
-        # --- Scheduler Settings ---
-        scheduler_frame = ttk.LabelFrame(main_frame, text="自動排程設定", padding=10)
-        scheduler_frame.pack(fill="x", pady=10)
-
-        self.schedule_enabled_var = tk.BooleanVar()
-        self.schedule_check = ttk.Checkbutton(scheduler_frame, text="啟用自動執行", variable=self.schedule_enabled_var, command=self.toggle_schedule_widgets)
-        self.schedule_check.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
-        
-        admin_warning_label = ttk.Label(scheduler_frame, text="(需要系統管理員權限)", foreground="gray")
-        admin_warning_label.grid(row=0, column=1, columnspan=2, sticky="w", padx=(100, 0))
-
-        self.schedule_type_var = tk.StringVar()
-        self.daily_radio = ttk.Radiobutton(scheduler_frame, text="每日", variable=self.schedule_type_var, value="DAILY")
-        self.weekdays_radio = ttk.Radiobutton(scheduler_frame, text="週一至週五", variable=self.schedule_type_var, value="WEEKDAYS")
-        self.daily_radio.grid(row=1, column=0, sticky="w", padx=(15, 0))
-        self.weekdays_radio.grid(row=1, column=1, sticky="w")
-
-        time_label = ttk.Label(scheduler_frame, text="執行時間 (24小時制):")
-        time_label.grid(row=2, column=0, sticky="w", pady=(10, 0), padx=(15,0))
-
-        self.hour_var = tk.StringVar()
-        self.hour_combo = ttk.Combobox(scheduler_frame, textvariable=self.hour_var, values=[f"{h:02d}" for h in range(24)], width=5, state="readonly")
-        self.hour_combo.grid(row=3, column=0, sticky="w", padx=(15,0))
-
-        colon_label = ttk.Label(scheduler_frame, text=":")
-        colon_label.grid(row=3, column=1, sticky="w", padx=5)
-
-        self.minute_var = tk.StringVar()
-        self.minute_combo = ttk.Combobox(scheduler_frame, textvariable=self.minute_var, values=[f"{m:02d}" for m in range(60)], width=5, state="readonly")
-        self.minute_combo.grid(row=3, column=2, sticky="w")
-
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(side="bottom", fill="x", pady=(20, 0))
 
@@ -598,37 +535,14 @@ class SettingsDialog(tk.Toplevel):
 
         self.cancel_button = ttk.Button(button_frame, text="取消", command=self.cancel_and_close)
         self.cancel_button.pack(side="right")
-        
-        self.load_settings_to_ui()
-        self.toggle_schedule_widgets()
-        
+
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.cancel_and_close)
-
-    def load_settings_to_ui(self):
-        self.multi_window_var.set(self.settings.get('enable_multi_window', False))
-        self.schedule_enabled_var.set(self.settings.get('schedule_enabled', False))
-        schedule_time = self.settings.get('schedule_time', '17:00')
-        hour, minute = schedule_time.split(':')
-        self.hour_var.set(hour)
-        self.minute_var.set(minute)
-        self.schedule_type_var.set(self.settings.get('schedule_type', 'DAILY'))
-
-    def toggle_schedule_widgets(self):
-        is_enabled = self.schedule_enabled_var.get()
-        state = "normal" if is_enabled else "disabled"
-        self.hour_combo.config(state=state if is_enabled else "readonly")
-        self.minute_combo.config(state=state if is_enabled else "readonly")
-        self.daily_radio.config(state=state)
-        self.weekdays_radio.config(state=state)
 
     def save_and_close(self):
         """Collects data from UI and passes it to the callback."""
         new_settings = {
             'enable_multi_window': self.multi_window_var.get(),
-            'schedule_enabled': self.schedule_enabled_var.get(),
-            'schedule_time': f"{self.hour_var.get()}:{self.minute_var.get()}",
-            'schedule_type': self.schedule_type_var.get()
         }
         self.on_close_callback(new_settings)
         self.destroy()
