@@ -1,21 +1,16 @@
 import logging
 import os
 import queue
-import re
-import shutil
 import subprocess
 import sys
 import threading
-import time
 import tkinter as tk
-from tkinter import Toplevel, filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
-
-from . import config, chrome_launcher, settings
+from . import config, settings
 from .logger import TkinterLogHandler, logger
-from .scraper import LietaScraper
-from .batch import BatchRunner, MODELS
+from .batch import BatchRunner
+from .dashboard import build_dashboard, COLORS
 
 
 class TickerApp:
@@ -25,8 +20,7 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Research 自動化工具 v1.1.0")
-        self.root.geometry("760x850")
+        self.root.title("Lieta Automator 1.1.1 · 模型下載工作台")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -53,52 +47,7 @@ class TickerApp:
         os.makedirs(self.temp_download_path_base, exist_ok=True)
 
     def _setup_ui(self):
-        style = ttk.Style()
-        style.theme_use('vista')
-        style.configure("TLabel", font=("Helvetica", 9))
-        style.configure("TButton", font=("Helvetica", 9))
-        style.configure("TCheckbutton", font=("Helvetica", 9))
-        style.configure("TLabelframe.Label", font=("Helvetica", 10, "bold"))
-
-        top_frame = ttk.Frame(self.root)
-        top_frame.pack(fill="x", padx=10, pady=(5, 0))
-        
-        try:
-            icon_path = os.path.join(getattr(sys, '_MEIPASS', config.BASE_DIR), "settings.png")
-            self.settings_icon = ImageTk.PhotoImage(Image.open(icon_path).resize((24, 24), Image.Resampling.LANCZOS))
-            settings_button = ttk.Button(top_frame, image=self.settings_icon, command=self._open_settings_window)
-            settings_button.pack(side="right")
-        except Exception:
-            settings_button = ttk.Button(top_frame, text="設定", command=self._open_settings_window)
-            settings_button.pack(side="right")
-
-
-        main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill="both", expand=True)
-
-        self._create_file_selection_frame(main_frame)
-        self._create_model_selection_frame(main_frame)
-        self._create_destination_path_frame(main_frame)
-
-        self.start_button = ttk.Button(main_frame, text="開始自動化", command=self.start_automation_thread, state="disabled")
-        self.start_button.pack(pady=15, ipadx=10, ipady=5)
-
-        self.resume_button = ttk.Button(main_frame, text="續跑批次", command=self._resume_batch)
-        self.resume_button.pack()
-        self.cooldown_label = ttk.Label(main_frame, text="共用冷卻：0 秒")
-        self.cooldown_label.pack()
-        self.model_status = {}
-        for model in MODELS:
-            row = ttk.Frame(main_frame)
-            row.pack(fill="x")
-            label = ttk.Label(row, text=f"{model}：未開始")
-            label.pack(side="left")
-            button = ttk.Button(row, text="登入後繼續", state="disabled",
-                                command=lambda m=model: self.runner.continue_model(m) if self.runner else None)
-            button.pack(side="right")
-            self.model_status[model] = (label, button)
-        self.root.after(250, self._poll_batch)
-        self._create_log_display_frame(main_frame)
+        build_dashboard(self)
 
     def _open_settings_window(self):
         # Pass a callback function to the dialog
@@ -113,6 +62,7 @@ class TickerApp:
         try:
             self.user_settings.update(new_settings)
             settings.save_settings(self.user_settings)
+            self.validate_inputs()
             logger.info("設定已儲存至 user_settings.json")
         except (IOError, OSError) as e:
             error_msg = f"無法儲存設定檔: {e}"
@@ -130,18 +80,27 @@ class TickerApp:
 
     def _setup_logging(self):
         tkinter_handler = TkinterLogHandler(self.log_queue)
+        self.tk_log_handler = tkinter_handler
         logger.addHandler(tkinter_handler)
+        self.root.bind("<Destroy>", self._remove_log_handler, add=True)
         self.root.after(100, self._process_log_queue)
+
+    def _remove_log_handler(self, event):
+        if event.widget == self.root:
+            logger.removeHandler(self.tk_log_handler)
 
     def _process_log_queue(self):
         try:
-            while not self.log_queue.empty():
+            # Yield regularly so a busy batch cannot starve buttons or repainting.
+            for _ in range(100):
                 record = self.log_queue.get_nowait()
                 msg = self.log_formatter.format(record)
                 
                 if self.log_text.winfo_exists():
                     self.log_text.config(state="normal")
                     self.log_text.insert(tk.END, msg + "\n")
+                    if int(self.log_text.index("end-1c").split(".")[0]) > 1500:
+                        self.log_text.delete("1.0", "101.0")
                     self.log_text.see(tk.END)
                     self.log_text.config(state="disabled")
         except queue.Empty:
@@ -149,51 +108,6 @@ class TickerApp:
         finally:
             if self.root.winfo_exists():
                 self.root.after(100, self._process_log_queue)
-
-    def _create_file_selection_frame(self, parent):
-        frame = ttk.LabelFrame(parent, text="1. 選擇 Ticker 檔案 (.txt)", padding=(10, 5))
-        frame.pack(fill="x", padx=5, pady=5)
-        self.file_label = ttk.Label(frame, text="尚未選擇檔案", wraplength=450, justify="left")
-        self.file_label.pack(side="left", fill="x", expand=True, padx=5)
-        self.load_button = ttk.Button(frame, text="瀏覽...", command=self.load_ticker_list)
-        self.load_button.pack(side="right")
-
-    def _create_model_selection_frame(self, parent):
-        frame = ttk.LabelFrame(parent, text="2. 選擇模型", padding=(10, 5))
-        frame.pack(fill="x", padx=5, pady=5)
-        
-        self.models = ["Gamma", "Term", "Smile", "TV Code"]
-        self.selected_models = {}
-        
-        last_selected = self.user_settings.get("last_selected_models", [])
-        
-        for i, model in enumerate(self.models):
-            var = tk.BooleanVar(value=(model in last_selected))
-            cb = ttk.Checkbutton(frame, text=model, variable=var, command=self.validate_inputs)
-            cb.grid(row=i // 4, column=i % 4, sticky="w", padx=5, pady=2)
-            self.selected_models[model] = var
-
-    def _create_destination_path_frame(self, parent):
-        frame = ttk.LabelFrame(parent, text="3. 選擇儲存目的地", padding=(10, 5))
-        frame.pack(fill="x", padx=5, pady=5)
-        
-        self.dest_label = ttk.Label(frame, text="尚未選擇路徑", wraplength=380, justify="left")
-        self.dest_label.pack(side="left", fill="x", expand=True, padx=5)
-
-        self.open_dest_button = ttk.Button(frame, text="打開資料夾", command=self.open_destination_folder, state="disabled")
-        self.open_dest_button.pack(side="right", padx=(0, 5))
-        
-        self.dest_button = ttk.Button(frame, text="瀏覽...", command=self.select_destination_path)
-        self.dest_button.pack(side="right")
-
-    def _create_log_display_frame(self, parent):
-        frame = ttk.LabelFrame(parent, text="進度日誌", padding=(10, 5))
-        frame.pack(fill="both", expand=True, padx=5, pady=5)
-        scrollbar = ttk.Scrollbar(frame)
-        scrollbar.pack(side="right", fill="y")
-        self.log_text = tk.Text(frame, height=10, state="disabled", wrap="word", yscrollcommand=scrollbar.set, font=("Courier New", 9))
-        self.log_text.pack(fill="both", expand=True)
-        scrollbar.config(command=self.log_text.yview)
 
     def _load_initial_state(self):
         if self.tickers_path and os.path.exists(self.tickers_path):
@@ -260,8 +174,21 @@ class TickerApp:
 
     def validate_inputs(self):
         has_dest = bool(self.destination_path and os.path.isdir(self.destination_path))
-        self.start_button.config(state="normal")
+        selected = sum(var.get() for var in self.selected_models.values())
+        missing = []
+        if not self.tickers:
+            missing.append("Ticker 清單")
+        if not selected:
+            missing.append("模型")
+        if not has_dest:
+            missing.append("儲存資料夾")
+        self.input_hint.config(text="請選擇：" + "、".join(missing) if missing else
+                               f"{len(set(self.tickers))} 個 ticker × {selected} 個模型")
+        self.start_button.config(state="normal" if not missing and not self.automation_running and not self.closing else "disabled")
         self.open_dest_button.config(state="normal" if has_dest else "disabled")
+        if not self.automation_running:
+            mode = "四模型獨立視窗" if self.user_settings.get("enable_multi_window", True) else "單視窗依序執行"
+            self.mode_label.config(text=f"{mode} · 等待上限 1")
 
     def start_automation_thread(self):
         if self.automation_running:
@@ -288,6 +215,8 @@ class TickerApp:
         self.root.after(0, self._start_batch)
 
     def _start_batch(self, resume=None):
+        if self.runner and not self.runner.done.is_set():
+            return
         try:
             selected = [m for m, var in self.selected_models.items() if var.get()]
             current = settings.load_settings()
@@ -295,7 +224,17 @@ class TickerApp:
             settings.save_settings(current)
             self.runner = BatchRunner(self.tickers.copy(), selected, self.destination_path,
                                       multi=current.get("enable_multi_window", True), resume=resume)
+            if resume:
+                # A resumed batch owns its destination and selection, not the form's previous values.
+                self.tickers = self.runner.tickers.copy()
+                self.tickers_path = ""
+                self.file_label.config(text=f"續跑清單：{len(self.tickers)} 個 ticker（取自批次紀錄）")
+                self.destination_path = self.runner.destination
+                self.dest_label.config(text=self.destination_path)
+                for model, var in self.selected_models.items():
+                    var.set(model in self.runner.models)
             self.automation_running = True
+            self.validate_inputs()
             self.toggle_ui_state(False)
             self.resume_button.config(state="disabled")
             threading.Thread(target=self.runner.run, daemon=False).start()
@@ -304,6 +243,14 @@ class TickerApp:
             self.automation_running = False
             self.toggle_ui_state(True)
             messagebox.showerror("無法開始", str(exc))
+
+    def stop_batch(self):
+        if self.runner and not self.runner.done.is_set():
+            self.runner.request_stop()
+            self.stop_button.config(state="disabled")
+            self.overall_label.config(text="正在停止並保存…")
+            for _, button in self.model_status.values():
+                button.config(state="disabled")
 
     def _resume_batch(self):
         path = filedialog.askopenfilename(title="選擇批次或單模型續跑紀錄", filetypes=[("JSON", "*.json")],
@@ -318,8 +265,29 @@ class TickerApp:
             for model, (label, button) in self.model_status.items():
                 state = states.get(model)
                 if state:
-                    label.config(text=f"{model}：{state['state']} {state['ticker']}　成功 {state['success']}／待補抓 {state.get('deferred', 0)}／未完成 {state['pending']}")
-                    button.config(state="normal" if state['state'] == "等待登入" and not self.closing else "disabled")
+                    status = state['state']
+                    color = COLORS['warning'] if status == '等待登入' else COLORS['error'] if '錯誤' in status or '失敗' in status else COLORS['accent'] if status == '完成' else COLORS['muted']
+                    label.config(text=f"{status}  {state['ticker']}", foreground=color)
+                    self.model_counts[model].config(text=f"完成 {state['success']} / {state['success'] + state['pending']} · 待補抓 {state.get('deferred', 0)}")
+                    self.model_progress[model].config(maximum=max(1, state['success'] + state['pending']), value=state['success'])
+                    button.config(state="normal" if status == "等待登入" and not self.closing and not self.runner.dispatch.stop.is_set() else "disabled")
+                else:
+                    label.config(text="本批次未選擇", foreground=COLORS['muted'])
+                    button.config(state="disabled")
+                    self.model_counts[model].config(text="完成 0 / 0 · 待補抓 0")
+                    self.model_progress[model].config(value=0, maximum=1)
+            success = sum(s['success'] for s in states.values())
+            total = sum(s['success'] + s['pending'] for s in states.values())
+            waiting = sum(s['state'] == '等待登入' for s in states.values())
+            summary = f"已完成 {success} / {total}"
+            if self.runner.done.is_set():
+                summary = "全部完成" if self.runner.data.get('status') == 'complete' else f"已保存進度 · 未完成 {total - success}"
+            elif self.runner.dispatch.stop.is_set():
+                summary = "正在停止並保存…"
+            elif waiting:
+                summary += f" · {waiting} 個等待登入"
+            self.overall_label.config(text=summary)
+            self.mode_label.config(text=("獨立視窗" if self.runner.multi else "單視窗") + f" · 提交間隔至少 5 秒 · 等待上限 {dispatch['limit']}")
             if self.runner.done.is_set() and self.automation_running:
                 self.automation_running = False
                 if not self.closing:
@@ -337,14 +305,11 @@ class TickerApp:
         self.load_button.config(state=state)
         self.dest_button.config(state=state)
         
-        try:
-            self.root.winfo_children()[0].winfo_children()[0].config(state=state)
-            model_frame = self.root.winfo_children()[1].winfo_children()[1]
-            for cb in model_frame.winfo_children():
-                if isinstance(cb, ttk.Checkbutton):
-                    cb.config(state=state)
-        except (IndexError, tk.TclError):
-            pass
+        self.settings_button.config(state=state)
+        self.resume_button.config(state=state)
+        for cb in self.model_checks:
+            cb.config(state=state)
+        self.stop_button.config(state="disabled" if is_enabled else "normal")
 
         if is_enabled:
             self.validate_inputs()
@@ -360,6 +325,7 @@ class TickerApp:
             self.cooldown_label.config(text="正在停止新請求並保存進度…")
             self.start_button.config(state="disabled")
             self.resume_button.config(state="disabled")
+            self.stop_button.config(state="disabled")
         else:
             self.root.destroy()
 
@@ -371,7 +337,8 @@ class SettingsDialog(tk.Toplevel):
         self.on_close_callback = on_close_callback
         self.transient(parent)
         self.title("設定")
-        self.geometry("450x180")
+        self.geometry("540x290")
+        self.configure(background=COLORS['background'])
         self.resizable(False, False)
 
         self.settings = settings.load_settings()
@@ -386,6 +353,8 @@ class SettingsDialog(tk.Toplevel):
         self.multi_window_var = tk.BooleanVar(value=self.settings.get("enable_multi_window", False))
         multi_window_cb = ttk.Checkbutton(general_frame, text="使用多視窗（各模型依序請求，共用冷卻時間）", variable=self.multi_window_var)
         multi_window_cb.pack(anchor="w")
+        ttk.Label(general_frame, text="每個模型使用自己的視窗，最多 1 個請求等待結果。\n所有視窗共用至少 5 秒提交間隔；遇到錯誤一起冷卻。",
+                  style="CardMuted.TLabel", justify="left").pack(anchor="w", pady=(12, 0))
 
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(side="bottom", fill="x", pady=(20, 0))
@@ -397,6 +366,8 @@ class SettingsDialog(tk.Toplevel):
         self.cancel_button.pack(side="right")
 
         self.grab_set()
+        self.cancel_button.focus_set()
+        self.bind("<Escape>", lambda event: self.cancel_and_close())
         self.protocol("WM_DELETE_WINDOW", self.cancel_and_close)
 
     def save_and_close(self):
