@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 from . import config, chrome_launcher, settings
 from .logger import TkinterLogHandler, logger
 from .scraper import LietaScraper
+from .batch import BatchRunner, MODELS
 
 
 class TickerApp:
@@ -24,8 +25,8 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Research 自動化工具 v1.0.4") # Version Bump
-        self.root.geometry("600x650")
+        self.root.title("Lieta Research 自動化工具 v1.1.0")
+        self.root.geometry("760x850")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -38,6 +39,8 @@ class TickerApp:
         self.log_queue = queue.Queue()
         self.scrapers = []
         self.automation_running = False
+        self.runner = None
+        self.closing = False
         self.log_formatter = logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S')
 
         self._setup_ui()
@@ -47,21 +50,7 @@ class TickerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def _prepare_temp_dir(self):
-        try:
-            os.makedirs(self.temp_download_path_base, exist_ok=True)
-            for item in os.listdir(self.temp_download_path_base):
-                item_path = os.path.join(self.temp_download_path_base, item)
-                try:
-                    if os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                    elif os.path.isfile(item_path) or os.path.islink(item_path):
-                        os.unlink(item_path)
-                except Exception as e:
-                    logger.warning(f"無法刪除暫存項目 {item_path}: {e}")
-        except Exception as e:
-            logger.error(f"無法建立或存取暫存資料夾 {self.temp_download_path_base}: {e}", exc_info=True)
-            messagebox.showerror("嚴重錯誤", f"無法準備暫存資料夾，請檢查權限.\n\n{e}")
-            self.root.destroy()
+        os.makedirs(self.temp_download_path_base, exist_ok=True)
 
     def _setup_ui(self):
         style = ttk.Style()
@@ -75,7 +64,7 @@ class TickerApp:
         top_frame.pack(fill="x", padx=10, pady=(5, 0))
         
         try:
-            icon_path = os.path.join(config.BASE_DIR, "settings.png")
+            icon_path = os.path.join(getattr(sys, '_MEIPASS', config.BASE_DIR), "settings.png")
             self.settings_icon = ImageTk.PhotoImage(Image.open(icon_path).resize((24, 24), Image.Resampling.LANCZOS))
             settings_button = ttk.Button(top_frame, image=self.settings_icon, command=self._open_settings_window)
             settings_button.pack(side="right")
@@ -94,6 +83,21 @@ class TickerApp:
         self.start_button = ttk.Button(main_frame, text="開始自動化", command=self.start_automation_thread, state="disabled")
         self.start_button.pack(pady=15, ipadx=10, ipady=5)
 
+        self.resume_button = ttk.Button(main_frame, text="續跑批次", command=self._resume_batch)
+        self.resume_button.pack()
+        self.cooldown_label = ttk.Label(main_frame, text="共用冷卻：0 秒")
+        self.cooldown_label.pack()
+        self.model_status = {}
+        for model in MODELS:
+            row = ttk.Frame(main_frame)
+            row.pack(fill="x")
+            label = ttk.Label(row, text=f"{model}：未開始")
+            label.pack(side="left")
+            button = ttk.Button(row, text="登入後繼續", state="disabled",
+                                command=lambda m=model: self.runner.continue_model(m) if self.runner else None)
+            button.pack(side="right")
+            self.model_status[model] = (label, button)
+        self.root.after(250, self._poll_batch)
         self._create_log_display_frame(main_frame)
 
     def _open_settings_window(self):
@@ -203,7 +207,7 @@ class TickerApp:
 
     def _load_tickers_from_path(self, file_path):
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, "r", encoding="utf-8-sig") as f:
                 self.tickers = [line.strip().upper() for line in f if line.strip()]
             if not self.tickers:
                 logger.warning(f"Ticker 檔案 {file_path} 為空。")
@@ -277,153 +281,54 @@ class TickerApp:
         self.automation_running = True
         self.toggle_ui_state(False)
         
-        thread = threading.Thread(target=self.run_automation_task, daemon=True)
-        thread.start()
+        self._start_batch()
 
     def run_automation_task(self):
+        # Kept as a compatibility entry; snapshot Tk values on the UI thread.
+        self.root.after(0, self._start_batch)
+
+    def _start_batch(self, resume=None):
         try:
-            use_multi_window = self.user_settings.get("enable_multi_window", False)
-            if use_multi_window:
-                self._run_multi_window_task()
-            else:
-                self._run_single_window_task()
-        except Exception as e:
-            logger.critical(f"自動化過程中發生未預期的嚴重錯誤: {e}", exc_info=True)
-            if self.root.winfo_exists():
-                self.root.after(0, lambda: messagebox.showerror("嚴重錯誤", f"自動化過程中發生嚴重錯誤，請查看 log.jsonl.\n\n{e}"))
-        finally:
-            if self.root.winfo_exists():
+            selected = [m for m, var in self.selected_models.items() if var.get()]
+            current = settings.load_settings()
+            current["last_selected_models"] = selected
+            settings.save_settings(current)
+            self.runner = BatchRunner(self.tickers.copy(), selected, self.destination_path,
+                                      multi=current.get("enable_multi_window", True), resume=resume)
+            self.automation_running = True
+            self.toggle_ui_state(False)
+            self.resume_button.config(state="disabled")
+            threading.Thread(target=self.runner.run, daemon=False).start()
+        except Exception as exc:
+            self.runner = None
+            self.automation_running = False
+            self.toggle_ui_state(True)
+            messagebox.showerror("無法開始", str(exc))
+
+    def _resume_batch(self):
+        path = filedialog.askopenfilename(title="選擇批次或單模型續跑紀錄", filetypes=[("JSON", "*.json")],
+                                          initialdir=os.path.join(config.BASE_DIR, "runs"))
+        if path:
+            self._start_batch(path)
+
+    def _poll_batch(self):
+        if self.runner:
+            states, dispatch = self.runner.snapshot()
+            self.cooldown_label.config(text=f"共用冷卻：{dispatch['cooldown']:.0f} 秒；等待結果 {dispatch['active']}/{dispatch['limit']}")
+            for model, (label, button) in self.model_status.items():
+                state = states.get(model)
+                if state:
+                    label.config(text=f"{model}：{state['state']} {state['ticker']}　成功 {state['success']}／待補抓 {state.get('deferred', 0)}／未完成 {state['pending']}")
+                    button.config(state="normal" if state['state'] == "等待登入" and not self.closing else "disabled")
+            if self.runner.done.is_set() and self.automation_running:
                 self.automation_running = False
-                self.toggle_ui_state(True)
-
-    def _run_multi_window_task(self):
-        selected_models = [model for model, var in self.selected_models.items() if var.get()]
-        current_settings = settings.load_settings()
-        current_settings["last_selected_models"] = selected_models
-        settings.save_settings(current_settings)
-
-        if len(selected_models) > len(config.REMOTE_DEBUGGING_PORTS):
-            msg = f"選擇的模型數量 ({len(selected_models)}) 超過可用埠號數量 ({len(config.REMOTE_DEBUGGING_PORTS)})。"
-            logger.error(msg)
-            # self.root.after(0, lambda: messagebox.showerror("錯誤", msg)) # This line is removed
-            return
-
-        logger.info("--- 自動化開始 (多視窗模式) ---")
-        
-        logger.info("階段 1: 關閉所有偵錯 Chrome 並同步所有 Profile（確保 Cookies 可複製）...")
-        chrome_launcher.kill_all_debug_chrome_instances()
-        chrome_launcher.sync_all_secondary_profiles()
-
-        profiles_to_launch = []
-        for i, model in enumerate(selected_models):
-            port = config.REMOTE_DEBUGGING_PORTS[i]
-            user_data_dir = config.get_chrome_user_data_dir(port)
-            profiles_to_launch.append({'port': port, 'user_data_dir': user_data_dir, 'model': model})
-        logger.info("所有設定檔準備完成。")
-
-        logger.info("階段 2: 啟動 Chrome 實例並執行自動化任務...")
-        self.scrapers = []
-        threads = []
-        
-        for profile in profiles_to_launch:
-            temp_path_for_port = config.get_temp_download_path_for_port(profile['port'])
-            scraper = LietaScraper(download_path=temp_path_for_port, port=profile['port'])
-            self.scrapers.append(scraper)
-            
-            thread = threading.Thread(
-                target=self._run_single_model_task,
-                args=(scraper, self.tickers.copy(), profile['model'], self.destination_path, profile['port'], profile['user_data_dir']),
-                daemon=True
-            )
-            threads.append(thread)
-            thread.start()
-            time.sleep(1)
-
-        for thread in threads:
-            thread.join()
-
-        logger.info("--- 所有線程執行完畢 ---")
-        
-        all_failed_tickers = []
-        for scraper in self.scrapers:
-            all_failed_tickers.extend(scraper.failed_tickers)
-        
-        total_tasks = len(selected_models) * len(self.tickers)
-        
-        if self.root.winfo_exists():
-            self.show_summary(total_tasks, all_failed_tickers)
-
-    def _run_single_model_task(self, scraper, tickers, model, dest_path, port, user_data_dir):
-        try:
-            if not chrome_launcher.launch_chrome_in_debug_mode(port, user_data_dir):
-                raise Exception(f"[Port {port}] 無法啟動 Chrome 偵錯實例。")
-            
-            logger.info(f"[Port {port}] 等待 Chrome 啟動...")
-            time.sleep(5)
-
-            if not scraper.setup_driver():
-                raise Exception(f"[Port {port}] 無法連接到 WebDriver。")
-
-            if not scraper.check_login_status():
-                if port == config.REMOTE_DEBUGGING_PORTS[0]:
-                     logger.error("使用者未登入。請先登入 Lieta Research 網站後再開始自動化。")
-                raise Exception(f"[Port {port}] 使用者未登入。")
-
-            logger.info(f"[Port {port}] WebDriver 設定成功，開始執行任務。")
-            scraper.run_automation(tickers, model, dest_path)
-
-        except Exception as e:
-            logger.error(f"處理模型 {model} 時發生錯誤: {e}", exc_info=True)
-            scraper.failed_tickers.extend([f"{t} ({model})" for t in tickers])
-        finally:
-            if scraper.driver:
-                scraper.close_driver()
-
-    def _run_single_window_task(self):
-        selected_models = [model for model, var in self.selected_models.items() if var.get()]
-        current_settings = settings.load_settings()
-        current_settings["last_selected_models"] = selected_models
-        settings.save_settings(current_settings)
-        
-        logger.info("--- 自動化開始 (單視窗模式) ---")
-        
-        port = config.REMOTE_DEBUGGING_PORTS[0]
-        user_data_dir = config.get_chrome_user_data_dir(port)
-        temp_path_for_port = config.get_temp_download_path_for_port(port)
-        
-        scraper = LietaScraper(download_path=temp_path_for_port, port=port)
-        self.scrapers = [scraper]
-
-        try:
-            if not chrome_launcher.launch_chrome_in_debug_mode(port, user_data_dir):
-                raise Exception("無法啟動 Chrome 偵錯實例。")
-            
-            time.sleep(5)
-
-            if not scraper.setup_driver():
-                raise Exception("無法連接到 WebDriver。")
-
-            if not scraper.check_login_status():
-                logger.error("使用者未登入。請先登入 Lieta Research 網站後再開始自動化。")
-                raise Exception("使用者未登入。")
-
-            all_failed_tickers = []
-            for model in selected_models:
-                failed = scraper.run_automation(self.tickers.copy(), model, self.destination_path)
-                all_failed_tickers.extend(failed)
-            
-            total_tasks = len(selected_models) * len(self.tickers)
-            if self.root.winfo_exists():
-                self.show_summary(total_tasks, all_failed_tickers)
-
-        except Exception as e:
-            logger.error(f"單視窗模式執行失敗: {e}", exc_info=True)
-            # The following messagebox is removed as the error is already logged.
-            # if self.root.winfo_exists():
-            #     self.root.after(0, lambda msg=str(e): messagebox.showerror("錯誤", f"自動化執行失敗: {msg}"))
-        finally:
-            if scraper.driver:
-                scraper.close_driver()
+                if not self.closing:
+                    self.toggle_ui_state(True)
+                    self.resume_button.config(state="normal")
+            if self.closing and self.runner.done.is_set():
+                self.root.destroy()
+                return
+        self.root.after(250, self._poll_batch)
 
     def toggle_ui_state(self, is_enabled):
         state = "normal" if is_enabled else "disabled"
@@ -448,61 +353,16 @@ class TickerApp:
         
         self.open_dest_button.config(state="normal" if self.destination_path and os.path.isdir(self.destination_path) else "disabled")
 
-    def show_summary(self, total_tasks, failed_tickers):
-        success_count = total_tasks - len(failed_tickers)
-        summary_msg = f"任務完成！\n\n總計: {total_tasks}\n成功: {success_count}\n失敗: {len(failed_tickers)}"
-        if failed_tickers:
-            unique_failures = sorted(list(set(failed_tickers)))
-            summary_msg += f"\n\n失敗的項目 ({len(unique_failures)} 個):\n" + "\n".join(unique_failures)
-        logger.info(f"任務總結: {summary_msg.replace('任務完成！', '').strip()}")
-
-    def cleanup(self):
-        try:
-            if os.path.exists(self.temp_download_path_base):
-                shutil.rmtree(self.temp_download_path_base)
-                logger.info(f"已清除暫存資料夾: {self.temp_download_path_base}")
-        except OSError as e:
-            logger.warning(f"無法自動刪除暫存資料夾: {e}", exc_info=True)
-
-    def _kill_chrome_processes(self):
-        if sys.platform != "win32": return
-        logger.info("正在嘗試關閉由本程式啟動的 Chrome 偵錯視窗...")
-        ports_to_check = [scraper.port for scraper in self.scrapers if scraper.port]
-        if not ports_to_check: return
-
-        try:
-            pids_to_kill = set()
-            cmd = "netstat -aon"
-            result = subprocess.check_output(cmd, shell=True, text=True, encoding='utf-8', errors='ignore')
-            
-            for port in ports_to_check:
-                match = re.search(r'TCP\s+127\.0\.0\.1:' + str(port) + r'\s+.*?\s+LISTENING\s+(\d+)', result)
-                if match:
-                    pids_to_kill.add(match.group(1))
-            
-            if not pids_to_kill: return
-
-            for pid in pids_to_kill:
-                try:
-                    subprocess.run(f"taskkill /F /PID {pid}", shell=True, check=True, capture_output=True)
-                    logger.info(f"已成功終止 PID: {pid}")
-                except subprocess.CalledProcessError:
-                    pass
-        except Exception as e:
-            logger.error(f"關閉 Chrome 程序時發生未預期錯誤: {e}", exc_info=True)
-
     def on_closing(self, force_close=False):
-        if self.automation_running and not messagebox.askokcancel("警告", "自動化正在執行中，確定要強制關閉程式嗎？"):
-            return
-        
-        if force_close or messagebox.askokcancel("結束", "確定要關閉程式嗎？"):
-            logger.info("正在關閉應用程式...")
-            self.automation_running = False
-            for scraper in self.scrapers:
-                if scraper.driver: scraper.close_driver()
-            self._kill_chrome_processes()
-            self.cleanup()
+        if self.runner and not self.runner.done.is_set():
+            self.closing = True
+            self.runner.request_stop()
+            self.cooldown_label.config(text="正在停止新請求並保存進度…")
+            self.start_button.config(state="disabled")
+            self.resume_button.config(state="disabled")
+        else:
             self.root.destroy()
+
 
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, on_close_callback):
@@ -524,7 +384,7 @@ class SettingsDialog(tk.Toplevel):
         general_frame.pack(fill="x", pady=5)
 
         self.multi_window_var = tk.BooleanVar(value=self.settings.get("enable_multi_window", False))
-        multi_window_cb = ttk.Checkbutton(general_frame, text="啟用多視窗下載 (實驗性功能)", variable=self.multi_window_var)
+        multi_window_cb = ttk.Checkbutton(general_frame, text="使用多視窗（各模型依序請求，共用冷卻時間）", variable=self.multi_window_var)
         multi_window_cb.pack(anchor="w")
 
         button_frame = ttk.Frame(main_frame)

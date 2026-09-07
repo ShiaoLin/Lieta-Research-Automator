@@ -15,7 +15,7 @@ def load_settings():
         "last_ticker_path": "",
         "last_destination_path": "",
         "last_selected_models": ["Gamma", "Term", "Smile", "TV Code"],
-        "enable_multi_window": False,
+        "enable_multi_window": True,
     }
 
     if os.path.exists(SETTINGS_FILE):

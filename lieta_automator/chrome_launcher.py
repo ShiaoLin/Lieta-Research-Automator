@@ -4,6 +4,9 @@ import socket
 import subprocess
 import winreg
 import shutil
+import time
+import json
+from urllib.request import urlopen
 from . import config
 from .logger import logger
 
@@ -27,89 +30,6 @@ def _copy_tree_ignore_locked(src: str, dst: str):
             except OSError:
                 skipped.append(s)
     return skipped
-
-
-def kill_all_debug_chrome_instances():
-    """
-    Kills all Chrome processes listening on the configured debug ports.
-    Called before multi-window sync so profile files are not locked.
-    """
-    try:
-        result = subprocess.check_output(
-            'netstat -aon', shell=True, text=True, encoding='utf-8', errors='ignore'
-        )
-        pids = set()
-        for port in config.REMOTE_DEBUGGING_PORTS:
-            m = re.search(
-                r'TCP\s+127\.0\.0\.1:' + str(port) + r'\s+.*?LISTENING\s+(\d+)', result
-            )
-            if m:
-                pids.add(m.group(1))
-        for pid in pids:
-            subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
-            logger.info(f"已關閉佔用偵錯 port 的 Chrome 程序 (PID {pid})。")
-    except Exception as e:
-        logger.warning(f"嘗試關閉 Chrome 程序時發生錯誤: {e}")
-
-
-def sync_all_secondary_profiles():
-    """
-    Syncs all secondary Chrome profiles from the primary profile.
-    Must be called while NO Chrome debug instances are running so that
-    the primary profile's Cookies file is not locked.
-    """
-    source_profile_dir = config.get_chrome_user_data_dir(config.REMOTE_DEBUGGING_PORTS[0])
-    if not os.path.exists(source_profile_dir):
-        logger.warning("主 Profile 資料夾不存在，跳過同步。")
-        return
-
-    for port in config.REMOTE_DEBUGGING_PORTS[1:]:
-        dest_profile_dir = config.get_chrome_user_data_dir(port)
-        # Remove stale sync marker so we always do a fresh sync.
-        sync_marker = os.path.join(dest_profile_dir, ".profile_synced")
-        if os.path.exists(sync_marker):
-            os.remove(sync_marker)
-
-        logger.info(f"正在同步 Profile → {os.path.basename(dest_profile_dir)}...")
-        os.makedirs(dest_profile_dir, exist_ok=True)
-        skipped = _copy_tree_ignore_locked(source_profile_dir, dest_profile_dir)
-
-        with open(sync_marker, 'w') as f:
-            f.write("synced")
-
-        if skipped:
-            logger.warning(
-                f"Profile '{os.path.basename(dest_profile_dir)}' 同步時跳過 {len(skipped)} 個鎖定檔案: "
-                + ", ".join(os.path.basename(p) for p in skipped)
-            )
-        else:
-            logger.info(f"Profile '{os.path.basename(dest_profile_dir)}' 同步完成。")
-
-
-def _sync_profile_if_new(port: int, dest_profile_dir: str):
-    """
-    Legacy per-port sync used by single-window mode.
-    For multi-window mode, call sync_all_secondary_profiles() instead.
-    """
-    if port == config.REMOTE_DEBUGGING_PORTS[0]:
-        return
-
-    source_profile_dir = config.get_chrome_user_data_dir(config.REMOTE_DEBUGGING_PORTS[0])
-    sync_marker_file = os.path.join(dest_profile_dir, ".profile_synced")
-
-    if os.path.exists(source_profile_dir) and not os.path.exists(sync_marker_file):
-        logger.info(f"檢測到新的 Profile: {os.path.basename(dest_profile_dir)}，正在同步...")
-        os.makedirs(dest_profile_dir, exist_ok=True)
-        skipped = _copy_tree_ignore_locked(source_profile_dir, dest_profile_dir)
-        with open(sync_marker_file, 'w') as f:
-            f.write("synced")
-        if skipped:
-            logger.warning(
-                f"Profile '{os.path.basename(dest_profile_dir)}' 同步完成，跳過 {len(skipped)} 個鎖定檔案: "
-                + ", ".join(os.path.basename(p) for p in skipped)
-            )
-        else:
-            logger.info(f"Profile '{os.path.basename(dest_profile_dir)}' 同步成功。")
 
 
 def find_chrome_executable():
@@ -153,28 +73,96 @@ def launch_chrome_in_debug_mode(port: int, user_data_dir: str):
     """
     logger.info(f"正在檢查 Port {port}...")
     if is_port_in_use(port):
-        logger.info(f"Port {port} 已被占用，假設對應的 Chrome 偵錯模式已在執行。")
-        return True
+        if owns_debug_port(port, user_data_dir):
+            return True
+        logger.error(f"Port {port} 被其他程序或 Profile 使用；不會關閉該程序。")
+        return False
 
     logger.info(f"Port {port} 未被使用，正在尋找 Chrome 安裝路徑...")
     chrome_path = find_chrome_executable()
     if not chrome_path:
         logger.error("找不到 Chrome 安裝路徑。請確認已安裝 Chrome。")
         return False
-
     logger.info(f"正在為 Port {port} 啟動新的 Chrome 偵錯實例...")
     command = [
-        f'"{chrome_path}"',  # Enclose the executable path in quotes
+        chrome_path,
         f"--remote-debugging-port={port}",
-        f'--user-data-dir="{user_data_dir}"',
-        f'"{config.LIETA_PLATFORM_URL}"'
+        f'--user-data-dir={user_data_dir}',
+        config.LIETA_PLATFORM_URL
     ]
     try:
         # Join the command list into a single string to be executed by the shell.
         # This is safer for paths with spaces.
-        subprocess.Popen(" ".join(command), shell=True)
+        subprocess.Popen(command)
         logger.info(f"已成功為 Port {port} 啟動 Chrome。請稍候瀏覽器開啟...")
         return True
     except Exception as e:
         logger.error(f"無法為 Port {port} 自動啟動 Chrome: {e}", exc_info=True)
         return False
+
+
+def wait_for_chrome(port, timeout=20):
+    """Wait for Chrome startup before attaching Selenium in unattended mode."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
+                value = json.load(response)
+                if value.get("webSocketDebuggerUrl") and "Chrome" in value.get("Browser", ""):
+                    return True
+        except (OSError, ValueError):
+            time.sleep(0.25)
+    return False
+
+
+def owns_debug_port(port, profile):
+    """Validate the listener PID and Chrome profile without terminating anything."""
+    script = (f"$listener = Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue; "
+              "$listener | ForEach-Object { Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) } "
+              "| Select-Object Name,CommandLine | ConvertTo-Json -Compress")
+    try:
+        output = subprocess.check_output(["powershell", "-NoProfile", "-Command", script],
+                                         text=True, encoding="utf-8", errors="replace",
+                                         creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+        processes = json.loads(output)
+        if isinstance(processes, dict):
+            processes = [processes]
+        expected = os.path.normcase(os.path.abspath(profile))
+        for process in processes or []:
+            command = process.get("CommandLine") or ""
+            match = re.search(r'--user-data-dir=(?:"([^"]+)"|([^\s]+))', command)
+            if (process.get("Name", "").lower() == "chrome.exe" and match
+                    and os.path.normcase(os.path.abspath(match.group(1) or match.group(2))) == expected):
+                return True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        logger.exception("無法確認偵錯埠的程序歸屬。")
+    return False
+
+
+def prepare_profiles(ports):
+    """Prepare closed profiles before any worker starts Chrome; never kill one."""
+    source_port = config.REMOTE_DEBUGGING_PORTS[0]
+    source = config.get_chrome_user_data_dir(source_port)
+    source_open = is_port_in_use(source_port)
+    for port in ports:
+        destination = config.get_chrome_user_data_dir(port)
+        if is_port_in_use(port):
+            if not owns_debug_port(port, destination):
+                raise RuntimeError(f"偵錯埠 {port} 與其他程序衝突。")
+            continue
+        incomplete = os.path.join(destination, '.profile_sync_incomplete')
+        if port == source_port or (os.path.isdir(destination) and not os.path.exists(incomplete)):
+            continue
+        if source_open or not os.path.isdir(source):
+            if os.path.exists(incomplete):
+                raise RuntimeError("Profile 同步尚未完成，請先關閉主偵錯 Chrome 再重試。")
+            continue  # New, independent profile; worker will pause for login.
+        os.makedirs(destination, exist_ok=True)
+        with open(incomplete, 'w') as marker:
+            marker.write('incomplete')
+        skipped = _copy_tree_ignore_locked(source, destination)
+        if skipped:
+            raise RuntimeError("Profile 同步不完整，未標記成功。請關閉相關 Chrome 後重試。")
+        with open(os.path.join(destination, '.profile_synced'), 'w') as marker:
+            marker.write('synced')
+        os.remove(incomplete)

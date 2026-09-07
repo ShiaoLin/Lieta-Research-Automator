@@ -6,6 +6,7 @@ automation_profile*/
 user_settings.json
 *.txt
 !requirements.txt
+!requirements-build.txt
 *.lnk
 
 # Screenshots and images (settings.png is a committed UI asset)
@@ -30,6 +31,9 @@ Thumbs.db
 # Build artifacts
 build/
 dist/
+.build-deps/
+runs/
+.test-output/
 *.egg-info/
 
 # AI assistant internal files

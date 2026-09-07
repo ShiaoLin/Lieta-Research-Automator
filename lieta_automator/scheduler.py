@@ -70,7 +70,10 @@ def create_or_update_task(schedule_time: str, schedule_type: str = 'DAILY'):
     
     # /TR 參數需要將執行檔路徑和其自身的參數視為一個單一的字串。
     # 格式: /TR "'C:\path\to\program.exe' --argument"
-    task_run_command = f'"{executable_path}" --run-automated'
+    if getattr(sys, 'frozen', False):
+        task_run_command = f'"{executable_path}" --run-automated'
+    else:
+        task_run_command = f'"{_get_python_executable()}" "{executable_path}" --run-automated'
 
     # 基礎命令
     command = [

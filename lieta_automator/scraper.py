@@ -1,11 +1,12 @@
 import os
+from pathlib import Path
 import shutil
 import time
-import traceback
 from datetime import datetime
+import uuid
 
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.webdriver.chrome.webdriver import WebDriver as ChromeDriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -13,399 +14,279 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from . import config
+from .journal import RunJournal, contains_block
 from .logger import logger
+from .notice_monitor import install_notice_monitor, stop_notice_monitor
+from .page_state import contains_ticker, read_page_state
+from .request_flow import LoginRequired, SHARED_COORDINATOR, fetch_result
+from .storage import replace_file
 
 
 class LietaScraper:
-    """
-    Handles all Selenium web scraping and file manipulation logic for a single
-    Chrome instance identified by a specific port.
-    """
+    """One browser adapter. All adapters share request pacing and cooldowns."""
 
-    def __init__(self, download_path, port):
-        self.download_path = download_path
+    def __init__(self, download_path, port, coordinator=None):
+        self.download_path = os.path.abspath(download_path)
         self.port = port
         self.driver = None
         self.failed_tickers = []
+        self.coordinator = coordinator or SHARED_COORDINATOR
+        self.journal = None
+        self.stop_check = lambda: None
 
     def setup_driver(self):
-        """
-        Sets up the Selenium WebDriver by connecting to an existing Chrome instance
-        on the port specified during initialization.
-        """
         try:
             logger.info(f"[Port {self.port}] 正在連接到 Chrome 瀏覽器...")
-            chrome_options = Options()
-            chrome_options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
-            service = ChromeService()
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-
-            # --- Set window position and size to avoid overlapping issues ---
+            options = Options()
+            options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
+            self.driver = ChromeDriver(service=ChromeService(), options=options)
+            self.driver.set_page_load_timeout(30)
+            # Hidden/background Chrome can suspend Radix animations and ignore
+            # native typing. Keep this automation tab active without stealing focus.
+            self.driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled", {"enabled": True})
             try:
-                base_port = config.REMOTE_DEBUGGING_PORTS[0]
-                window_index = self.port - base_port
-                cascade_offset = 50
-                pos_x = window_index * cascade_offset
-                pos_y = window_index * cascade_offset
-                
+                offset = (self.port - config.REMOTE_DEBUGGING_PORTS[0]) * 50
                 self.driver.set_window_size(1200, 800)
-                self.driver.set_window_position(pos_x, pos_y)
-                logger.info(f"[Port {self.port}] 已將視窗移動至 ({pos_x}, {pos_y})。")
-            except Exception as e:
-                logger.warning(f"[Port {self.port}] 設定視窗位置或大小時發生非嚴重錯誤: {e}")
-            # ----------------------------------------------------------------
-
-            logger.info(f"[Port {self.port}] 成功連接到 Chrome。")
+                self.driver.set_window_position(offset, offset)
+            except Exception as exc:
+                logger.warning(f"[Port {self.port}] 無法調整視窗: {exc}")
             return True
-        except Exception as e:
-            logger.error(f"[Port {self.port}] 無法連接到 Chrome 瀏覽器: {e}", exc_info=True)
+        except Exception:
+            logger.exception(f"[Port {self.port}] 無法連接 Chrome。")
             return False
+
+    def _wait(self, timeout=None):
+        return WebDriverWait(self.driver, timeout or config.SELENIUM_TIMEOUT,
+                             poll_frequency=0.3,
+                             ignored_exceptions=(StaleElementReferenceException,))
 
     def check_login_status(self):
-        """
-        Checks if the user is logged in by verifying the URL.
-        """
         try:
-            logger.info(f"[Port {self.port}] 正在檢查登入狀態...")
             self.driver.get(config.LIETA_AUTOMATION_URL)
-            time.sleep(3)
-            current_url = self.driver.current_url
-            logger.info(f"[Port {self.port}] 目前網址為: {current_url}")
-            if self.driver.current_url == config.LIETA_AUTOMATION_URL:
-                logger.info(f"[Port {self.port}] 網址符合預期，使用者已登入。")
-                return True
-            else:
-                logger.warning(f"[Port {self.port}] 網址不符合預期 ({current_url})，使用者可能尚未登入。")
-                return False
-        except Exception as e:
-            logger.error(f"[Port {self.port}] 檢查登入狀態時發生未知錯誤: {e}", exc_info=True)
+            self._wait().until(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, 'input[placeholder="Ticker"]')))
+            return True
+        except Exception:
+            logger.warning(f"[Port {self.port}] 找不到模型表單，請確認已登入 Lieta。")
             return False
 
-    def run_automation(self, tickers, model, destination_path):
-        """Main automation loop for a single model."""
-        self.failed_tickers = []
-        logger.info(f"--- [Port {self.port}] 開始處理模型: {model} ---")
-
-        try:
-            logger.info(f"[Port {self.port}] 導航至 Lieta 平台: {config.LIETA_AUTOMATION_URL}")
-            self.driver.get(config.LIETA_AUTOMATION_URL)
-            wait = WebDriverWait(self.driver, config.SELENIUM_TIMEOUT)
-            wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[role="combobox"]')))
-            logger.info(f"[Port {self.port}] 模型選擇器按鈕已找到。")
-        except Exception as e:
-            logger.error(f"[Port {self.port}] 無法載入 Lieta 平台或找不到初始模型選擇器: {e}", exc_info=True)
-            self.failed_tickers.extend([f"{ticker} ({model})" for ticker in tickers])
-            return self.failed_tickers
-
-        # --- Select the model ---
-        selection_successful = False
-        try:
-            for attempt in range(2):
-                logger.info(f"[Port {self.port}] 第 {attempt + 1} 次嘗試選擇模型: {model}")
-                wait = WebDriverWait(self.driver, config.SELENIUM_TIMEOUT)
-                
-                model_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[role="combobox"]')))
-                self.driver.execute_script("arguments[0].click();", model_button)
-                
-                model_option = wait.until(EC.element_to_be_clickable((By.XPATH, f"//div[contains(text(), '{model}')]")))
-                self.driver.execute_script("arguments[0].click();", model_option)
-                
-                try:
-                    wait.until(EC.text_to_be_present_in_element((By.CSS_SELECTOR, 'button[role="combobox"]'), model))
-                    logger.info(f"[Port {self.port}] 驗證成功: 目前模型已切換為 {model}")
-                    selection_successful = True
-                    break
-                except Exception:
-                    logger.warning(f"[Port {self.port}] 第 {attempt + 1} 次嘗試驗證失敗。")
-                    if attempt == 0: time.sleep(3)
-
-            if not selection_successful:
-                raise Exception("重試後仍無法成功選擇模型。")
-
-        except Exception as e:
-            logger.error(f"[Port {self.port}] 無法選擇模型 {model}，將跳過此模型的所有 Ticker。原因: {e}", exc_info=True)
-            self.failed_tickers.extend([f"{ticker} ({model})" for ticker in tickers])
-            return self.failed_tickers
-
-        # --- Process tickers for the selected model ---
-        if model == "TV Code":
-            self._process_tv_code(tickers, destination_path)
+    def _select_model(self, model, *, refresh=False):
+        # Navigation also discards any late response from an abandoned ticker.
+        if refresh:
+            self.driver.refresh()
         else:
-            self._process_html_model(model, tickers, destination_path)
+            self.driver.get(config.LIETA_AUTOMATION_URL)
+        install_notice_monitor(self.driver)
+        wait = self._wait(timeout=30)
+        try:
+            button = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, 'button[role="combobox"]')))
+        except Exception as exc:
+            if not read_page_state(self.driver, "", model).authenticated:
+                raise LoginRequired("無法開啟模型表單，請確認登入狀態。") from exc
+            raise RuntimeError("模型表單未在期限內載入。") from exc
+        # The server-rendered button can appear before its click handler is ready.
+        # Verify the popup opened, and retry without toggling an already-open menu.
+        for attempt in range(3):
+            try:
+                button = wait.until(EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'button[role="combobox"]')))
+                if button.text.strip() == model:
+                    return
+                if button.get_attribute("aria-expanded") != "true":
+                    # Keep the original app's DOM click and verify the UI response.
+                    self.driver.execute_script("arguments[0].click();", button)
+                option = self._wait(timeout=5).until(EC.element_to_be_clickable(
+                    (By.XPATH, f"//*[@role='option' and normalize-space(.)='{model}']")))
+                self.driver.execute_script("arguments[0].click();", option)
+                self._wait(timeout=5).until(lambda driver: driver.find_element(
+                    By.CSS_SELECTOR, 'button[role="combobox"]').text.strip() == model)
+                return
+            except (TimeoutException, StaleElementReferenceException):
+                logger.warning(f"模型選單尚未完成互動，重新確認 ({attempt + 1}/3)。")
+        raise RuntimeError(f"無法選擇模型 {model}。")
 
-        logger.info(f"--- [Port {self.port}] 模型 {model} 處理完畢 ---")
+    def _wait_for_slot(self):
+        remaining = self.coordinator.next_allowed - time.monotonic()
+        if remaining > 0:
+            logger.info(f"[Port {self.port}] 切換前等待 {remaining:.1f} 秒。")
+        while True:
+            remaining = self.coordinator.next_allowed - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
+
+    def _fill_ticker(self, ticker):
+        def fill(driver):
+            element = driver.find_element(By.CSS_SELECTOR, 'input[placeholder="Ticker"]')
+            if not element.is_displayed() or not element.is_enabled():
+                return False
+            element.clear()
+            element.send_keys(ticker)
+            return element.get_attribute("value").strip().upper() == ticker
+        try:
+            self._wait().until(fill)
+        except TimeoutException as exc:
+            if not read_page_state(self.driver, ticker, "").authenticated:
+                raise LoginRequired("已回到登入頁，請重新登入 Lieta 後續跑。") from exc
+            raise
+
+    def _restore_session(self, ticker, model):
+        self._select_model(model, refresh=True)
+        self._fill_ticker(ticker)
+
+    def _submit(self):
+        self._wait().until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, 'button[type="submit"]'))).click()
+
+    def run_automation(self, tickers, model, destination_path, resume_path=None):
+        if model not in ("Gamma", "Term", "Smile", "TV Code"):
+            raise ValueError(f"不支援的模型: {model}")
+        tickers = list(dict.fromkeys(t.strip().upper() for t in tickers if t.strip()))
+        if any(ticker in (".", "..") or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.^_-"
+                   for c in ticker) for ticker in tickers):
+            raise ValueError("Ticker 含有不支援的字元。")
+        self.failed_tickers = []
+        self.journal = RunJournal(tickers, model, destination_path, resume_path)
+        logger.info(f"--- [{model}] 開始；續跑紀錄: {self.journal.path} ---")
+        pending = [ticker for ticker in tickers if not self.journal.completed(ticker)]
+        reset_page = True
+        # A second pass revisits only failures after the other tickers have run.
+        for pass_number in range(2):
+            failed = []
+            for index, ticker in enumerate(pending):
+                started = time.monotonic()
+                try:
+                    with self.coordinator.request_slot():
+                        self._wait_for_slot()
+                        if reset_page:
+                            self._select_model(model)
+                            reset_page = False
+                        self._fill_ticker(ticker)
+                        logger.info(f"[{model}|{ticker}] ({index + 1}/{len(pending)}) 開始獲取。")
+                        state = fetch_result(
+                            lambda: read_page_state(self.driver, ticker, model),
+                            self._submit, self.coordinator,
+                            lambda message: logger.info(f"[{model}|{ticker}] {message}"),
+                            recover_session=lambda: self._restore_session(ticker, model),
+                        )
+                        if model == "TV Code":
+                            path = self._save_tv_code(ticker, state.text, destination_path)
+                        else:
+                            path = self._download_html(ticker, model, destination_path, state.result_key)
+                        self.journal.record(ticker, path=path,
+                                            content=state.text if model == "TV Code" else None)
+                    logger.info(f"成功: [{model}|{ticker}] {time.monotonic() - started:.1f} 秒，{path}")
+                except LoginRequired as exc:
+                    logger.error(f"{exc} 未完成項目已保留，續跑紀錄: {self.journal.path}")
+                    failed = [item for item in tickers if not self.journal.completed(item)]
+                    for remaining in failed:
+                        self.journal.record(remaining, error=exc)
+                    self.failed_tickers = [f"{item} ({model})" for item in failed]
+                    return self.failed_tickers
+                except Exception as exc:
+                    logger.exception(f"失敗: [{model}|{ticker}] {exc}")
+                    self.journal.record(ticker, error=exc)
+                    failed.append(ticker)
+                    reset_page = True
+            pending = failed
+            if not pending:
+                break
+            if pass_number == 0:
+                reset_page = True
+                logger.info(f"[{model}] 第一輪完成，補抓 {len(pending)} 個失敗項目。")
+        self.failed_tickers = [f"{ticker} ({model})" for ticker in pending]
+        logger.info(f"--- [{model}] 完成，仍失敗 {len(pending)} 項 ---")
         return self.failed_tickers
 
-    def _process_html_model(self, model, tickers, destination_path):
-        """Processes models that download an HTML file."""
-        wait = WebDriverWait(self.driver, config.SELENIUM_TIMEOUT)
-        long_wait = WebDriverWait(self.driver, 90, poll_frequency=0.3)
+    def _download_html(self, ticker, model, destination, expected_key):
+        state = read_page_state(self.driver, ticker, model)
+        if not state.authenticated:
+            raise LoginRequired("下載前已回到登入頁，請重新登入 Lieta 後續跑。")
+        if state.session_expired:
+            # Never save a chart beside an authorization error. The failed item
+            # will be revisited with a clean page by the existing second pass.
+            raise RuntimeError("下載前出現 Unauthorized，拒絕儲存，將重新載入頁面補抓。")
+        if not state.ready or not state.matches or state.busy or state.result_key != expected_key:
+            raise RuntimeError("下載前圖表已變更或尚未就緒，拒絕儲存可能錯置的資料。")
+        # Isolate each download so an unrelated/late file cannot be selected.
+        folder = Path(self.download_path) / uuid.uuid4().hex
+        folder.mkdir(parents=True)
+        self.driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+            "behavior": "allow", "downloadPath": str(folder),
+        })
+        self._wait().until(EC.element_to_be_clickable(
+            (By.XPATH, "//button[contains(., '下載') or contains(., 'Download')]"))).click()
+        source = self._wait_for_download(folder)
+        self._validate_html(source, ticker)
+        target_dir = Path(destination) / model / ticker
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H;%M")
+        target = target_dir / f"{timestamp}_{ticker}_{model}.html"
+        temporary = target.with_suffix(".html.partial")
+        # copy2 works even while Windows scanning retains the downloaded file.
+        shutil.copy2(source, temporary)
+        replace_file(temporary, target, on_retry=logger.info)
+        return target
 
-        # Set download path once before the loop to avoid repeated CDP calls per ticker.
-        os.makedirs(self.download_path, exist_ok=True)
-        self.driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": self.download_path})
-
-        total_tickers = len(tickers)
-        next_ticker_pre_typed = False
-
-        def ts(t0):
-            """Returns elapsed seconds since t0 as a formatted string."""
-            return f"+{time.time() - t0:.2f}s"
-
-        for i, ticker in enumerate(tickers):
-            t_ticker_start = time.time()
-            logger.info(f"[TIMING] ({i+1}/{total_tickers}) [{model}|{ticker}] 開始")
-            try:
-                chart_loaded = False
-                for attempt in range(2):
-                    if attempt == 0 and next_ticker_pre_typed:
-                        logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 已預先輸入，略過打字")
-                        next_ticker_pre_typed = False
-                    else:
-                        t0 = time.time()
-                        ticker_input = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'input[placeholder="Ticker"]')))
-                        ticker_input.clear()
-                        ticker_input.send_keys(ticker)
-                        if i == 0:
-                            time.sleep(1)
-                        logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 輸入完成 (耗時 {time.time()-t0:.2f}s)")
-
-                    t0 = time.time()
-                    submit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
-                    submit_button.click()
-                    logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} submit 已點擊 (等待submit按鈕 {time.time()-t0:.2f}s)")
-
-                    t0 = time.time()
-                    loaded = self._submit_with_server_error_retry(
-                        wait, long_wait, t_ticker_start, self._wait_for_chart_or_error
-                    )
-                    if loaded:
-                        logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} SVG 出現 (等待圖表 {time.time()-t0:.2f}s)")
-                        chart_loaded = True
-                        break
-                    else:
-                        logger.warning(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} SVG 等待失敗 ({time.time()-t0:.2f}s)")
-                        next_ticker_pre_typed = False
-                        if attempt == 0:
-                            logger.info(f"[TIMING] [{model}|{ticker}] 重試...")
-                if not chart_loaded:
-                    raise Exception("重試後仍然無法載入圖表。")
-
-                t0 = time.time()
-                files_before_download = set(os.listdir(self.download_path))
-                download_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., '下載')]")))
-                download_button.click()
-                logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 下載按鈕已點擊 (等待按鈕 {time.time()-t0:.2f}s)")
-
-                t0 = time.time()
-                downloaded_file_path = self._wait_for_new_file(files_before_download, ".html")
-                if not downloaded_file_path:
-                    raise Exception("下載超時或未找到新的 .html 檔案。")
-                logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 檔案出現 (等待檔案 {time.time()-t0:.2f}s)")
-
-                t0 = time.time()
-                self._wait_for_download_complete(downloaded_file_path)
-                logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 下載完成 (確認大小穩定 {time.time()-t0:.2f}s)")
-
-                next_index = i + 1
-                if next_index < total_tickers:
-                    t0 = time.time()
-                    try:
-                        next_input = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'input[placeholder="Ticker"]')))
-                        next_input.clear()
-                        next_input.send_keys(tickers[next_index])
-                        next_ticker_pre_typed = True
-                        logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 預先輸入 {tickers[next_index]} 完成 (耗時 {time.time()-t0:.2f}s)")
-                    except Exception:
-                        next_ticker_pre_typed = False
-
-                t0 = time.time()
-                target_dir = os.path.join(destination_path, model, ticker.upper())
-                os.makedirs(target_dir, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H;%M")
-                new_filename = f"{timestamp}_{ticker.upper()}_{model}.html"
-                new_filepath = os.path.join(target_dir, new_filename)
-                # Use copy2 instead of move: copy only requires read access and completes
-                # immediately even while Windows security scanning holds a write lock on
-                # the freshly downloaded file. The temp file is cleaned up on next launch.
-                shutil.copy2(downloaded_file_path, new_filepath)
-                logger.info(f"[TIMING] [{model}|{ticker}] {ts(t_ticker_start)} 檔案複製完成 (copy {time.time()-t0:.2f}s) | 本 ticker 總耗時 {time.time()-t_ticker_start:.2f}s")
-
-            except Exception as e:
-                next_ticker_pre_typed = False
-                logger.error(f"失敗: [Port:{self.port}|{model}] - {ticker}. 原因: {str(e).splitlines()[0]}", exc_info=True)
-                self.failed_tickers.append(f"{ticker} ({model})")
-
-    def _process_tv_code(self, tickers, destination_path):
-        """Processes the 'TV Code' model which scrapes text."""
-        wait = WebDriverWait(self.driver, config.SELENIUM_TIMEOUT)
-        long_wait = WebDriverWait(self.driver, 90, poll_frequency=0.3)
-        target_dir = os.path.join(destination_path, "TV Code")
-        os.makedirs(target_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d")
-        output_filepath = os.path.join(target_dir, f"{timestamp}_TV Code.txt")
-        for i, ticker in enumerate(tickers):
-            logger.info(f"({i+1}/{len(tickers)}) [Port:{self.port}|TV Code] 處理中: {ticker}")
-            try:
-                text_loaded = False
-                for attempt in range(2):
-                    logger.info(f"[Port {self.port}] 第 {attempt + 1} 次嘗試提交 {ticker}...")
-                    ticker_input = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'input[placeholder="Ticker"]')))
-                    ticker_input.clear()
-                    ticker_input.send_keys(ticker)
-                    if i == 0:
-                        logger.info("為第一個 Ticker 增加 1 秒延遲...")
-                        time.sleep(1)
-                    submit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]')))
-                    submit_button.click()
-                    ticker_upper = ticker.upper()
-                    logger.info(f"[Port {self.port}] 正在等待 {ticker} 的 TV Code (最多 90 秒，含自動重試)...")
-                    loaded = self._submit_with_server_error_retry(
-                        wait, long_wait, time.time(), self._wait_for_tv_code_or_error, ticker_upper
-                    )
-                    if loaded:
-                        logger.info(f"[Port {self.port}] 成功取得 {ticker} 的 TV Code。")
-                        text_loaded = True
-                        break
-                    else:
-                        logger.warning(f"[Port {self.port}] 第 {attempt+1} 次嘗試失敗。")
-                        if attempt == 0: logger.info("正在準備重試...")
-                if not text_loaded:
-                    raise Exception("重試後仍然無法取得 TV Code。")
-                ticker_upper = ticker.upper()
-                p_element = self.driver.find_element(By.XPATH, f"//p[contains(text(), '{ticker_upper}:')] ")
-                code_text = p_element.text
-                with open(output_filepath, "a", encoding="utf-8") as f:
-                    f.write(code_text + "\n")
-                logger.info(f"成功: [Port:{self.port}|TV Code] for {ticker.upper()} 已儲存。")
-            except Exception as e:
-                logger.error(f"失敗: [Port:{self.port}|TV Code] - {ticker}. 原因: {str(e).splitlines()[0]}", exc_info=True)
-                self.failed_tickers.append(f"{ticker} (TV Code)")
-
-    # --- Server-error detection helpers ---
-
-    _SERVER_ERROR_RETRIES = 100  # keep retrying until SVG appears or limit reached
-
-    # JavaScript: case-insensitive search for "try again later" in any leaf DOM element
-    _JS_SERVER_ERROR = (
-        "return Array.from(document.querySelectorAll('*')).some("
-        "  el => el.childElementCount === 0 &&"
-        "  el.textContent.toLowerCase().includes('try again later')"
-        ");"
-    )
-
-    def _wait_for_chart_or_error(self, long_wait: WebDriverWait):
-        """
-        Waits until svg.main-svg appears ("loaded") or a server-error toast is
-        detected ("error"). Returns None on 90-second timeout.
-        """
-        js = self._JS_SERVER_ERROR
-
-        class _Condition:
-            def __call__(self, driver):
-                if driver.find_elements(By.CSS_SELECTOR, 'svg.main-svg'):
-                    return "loaded"
-                if driver.execute_script(js):
-                    return "error"
-                return False
-
-        try:
-            return long_wait.until(_Condition())
-        except TimeoutException:
-            return None
-
-    def _wait_for_tv_code_or_error(self, long_wait: WebDriverWait, ticker_upper: str):
-        """Same dual-detection for TV Code model."""
-        js = self._JS_SERVER_ERROR
-
-        class _Condition:
-            def __call__(self, driver):
-                if driver.execute_script(js):
-                    return "error"
-                paragraphs = driver.find_elements(By.XPATH, "//p")
-                if any(f"{ticker_upper}:" in p.text for p in paragraphs):
-                    return "loaded"
-                return False
-
-        try:
-            return long_wait.until(_Condition())
-        except TimeoutException:
-            return None
-
-    def _submit_with_server_error_retry(self, wait, long_wait, t_ticker_start, wait_fn, *args):
-        """
-        After each submit, calls wait_fn to detect success or server error.
-        On "error", waits 1 second and re-clicks submit.
-        Keeps retrying up to _SERVER_ERROR_RETRIES times or until SVG appears.
-        Returns True if "loaded", False if timeout or retry limit reached.
-        """
-        def ts():
-            return f"+{time.time() - t_ticker_start:.2f}s"
-
-        for retry in range(self._SERVER_ERROR_RETRIES):
-            result = wait_fn(long_wait, *args)
-            if result == "loaded":
-                return True
-            if result == "error":
-                logger.warning(
-                    f"[Port {self.port}] {ts()} 偵測到伺服器錯誤，"
-                    f"第 {retry + 1}/{self._SERVER_ERROR_RETRIES} 次自動重新提交..."
-                )
-                time.sleep(1)
+    def _wait_for_download(self, folder, timeout=90):
+        deadline = time.monotonic() + timeout
+        last = None
+        stable_since = time.monotonic()
+        while time.monotonic() < deadline:
+            self.stop_check()
+            files = list(folder.glob("*.html"))
+            if len(files) == 1 and not list(folder.glob("*.crdownload")):
                 try:
-                    submit_button = wait.until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"]'))
-                    )
-                    submit_button.click()
-                    logger.info(f"[Port {self.port}] {ts()} 已重新提交。")
-                except Exception as e:
-                    logger.error(f"[Port {self.port}] 重新提交失敗: {e}")
-                    return False
-            else:
-                # 90-second timeout with no result and no error message
-                return False
-
-        logger.error(f"[Port {self.port}] 已達重試上限 ({self._SERVER_ERROR_RETRIES} 次)，仍未取得結果。")
-        return False
-
-    # ----------------------------------------
-
-    def _wait_for_new_file(self, files_before, extension, timeout=90):
-        """Waits for a new file with a specific extension to appear."""
-        timeout_end = time.time() + timeout
-        while time.time() < timeout_end:
-            files_after = set(os.listdir(self.download_path))
-            new_files = files_after - files_before
-            if new_files:
-                for file in new_files:
-                    if file.endswith(extension):
-                        return os.path.join(self.download_path, file)
-            time.sleep(0.3)
-        return None
-
-    def _wait_for_download_complete(self, filepath, timeout=90):
-        """Waits for a file to be fully downloaded by checking if the file size is stable."""
-        last_size = -1
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if os.path.exists(filepath):
-                try:
-                    current_size = os.path.getsize(filepath)
-                    if current_size == last_size and current_size > 0:
-                        return True
-                    last_size = current_size
+                    signature = (files[0], files[0].stat().st_size)
+                    if signature == last and signature[1] > 0:
+                        if time.monotonic() - stable_since >= 2:
+                            return files[0]
+                    else:
+                        last, stable_since = signature, time.monotonic()
                 except OSError:
-                    pass
+                    last = None
+            else:
+                last = None
             time.sleep(0.3)
-        raise Exception(f"Download timed out for {os.path.basename(filepath)}")
+        raise TimeoutError("下載未完成，未將檔案列為成功。")
+
+    @staticmethod
+    def _validate_html(path, ticker):
+        content = Path(path).read_text(encoding="utf-8-sig")
+        lower = content.lower()
+        if "<html" not in lower or "</html>" not in lower or not contains_ticker(content, ticker):
+            raise ValueError(f"下載的 HTML 不完整或找不到 ticker {ticker}。")
+
+    @staticmethod
+    def _save_tv_code(ticker, text, destination):
+        if not text.strip() or not contains_ticker(text, ticker):
+            raise ValueError("TV Code 內容與 ticker 不符。")
+        folder = Path(destination) / "TV Code"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{datetime.now():%Y%m%d}_TV Code.txt"
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        # Retries/resume do not append a second copy of exactly the same code.
+        if not contains_block(existing, text):
+            temporary = target.with_suffix(".txt.partial")
+            temporary.write_text(existing.rstrip("\n") + ("\n" if existing else "")
+                                 + text.strip() + "\n", encoding="utf-8")
+            replace_file(temporary, target, on_retry=logger.info)
+        return target
 
     def close_driver(self):
-        """Closes the WebDriver."""
         if self.driver:
             try:
+                stop_notice_monitor(self.driver)
+            except Exception:
+                pass
+            try:
+                self.driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled", {"enabled": False})
+            except Exception:
+                pass  # The browser may already be closed; still release WebDriver.
+            try:
                 self.driver.quit()
-                logger.info(f"[Port {self.port}] WebDriver 已成功關閉。")
-            except Exception as e:
-                logger.error(f"[Port {self.port}] 關閉 WebDriver 時發生錯誤: {e}", exc_info=True)
+            except Exception:
+                logger.exception(f"[Port {self.port}] 關閉 WebDriver 失敗。")
             finally:
                 self.driver = None
