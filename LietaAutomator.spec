@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='LietaAutomator_1.1.1',
+    name='LietaAutomator_1.1.2',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

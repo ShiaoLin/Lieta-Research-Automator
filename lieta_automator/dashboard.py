@@ -82,7 +82,7 @@ def build_dashboard(app):
     content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
     def wheel(event):
-        if event.widget.winfo_toplevel() == root and event.widget != app.log_text:
+        if event.widget.winfo_toplevel() == root and event.widget not in (app.log_text, app.summary_text):
             canvas.yview_scroll(-int(event.delta / 120), "units")
     root.bind("<MouseWheel>", wheel, add=True)
     def reveal_focus(event):
@@ -143,6 +143,8 @@ def build_dashboard(app):
     app.input_hint.pack(fill="x", pady=(18, 10))
     app.start_button = ttk.Button(body, text="開始下載", style="Primary.TButton", command=app.start_automation_thread)
     app.start_button.pack(fill="x")
+    app.retry_button = ttk.Button(body, text="重試失敗項目", command=app._retry_failed)
+    app.retry_button.pack(fill="x", pady=(8, 0))
     app.resume_button = ttk.Button(body, text="續跑既有批次…", command=app._resume_batch)
     app.resume_button.pack(fill="x", pady=(8, 0))
     app.stop_button = ttk.Button(body, text="停止並保存進度", style="Stop.TButton", command=app.stop_batch, state="disabled")
@@ -179,6 +181,16 @@ def build_dashboard(app):
         app.model_status[model] = (label, button)
         app.model_progress[model] = progress
         app.model_counts[model] = count
+
+    panel, body = card(content, 16)
+    panel.pack(fill="x", pady=(20, 0))
+    ttk.Label(body, text="最後總結", style="CardHeading.TLabel").pack(anchor="w")
+    app.summary_text = tk.Text(body, height=7, wrap="word", state="disabled", font=(FONT, 10),
+                               background=COLORS['surface'], foreground=COLORS['text'], relief='flat')
+    summary_scroll = ttk.Scrollbar(body, command=app.summary_text.yview)
+    summary_scroll.pack(side='right', fill='y')
+    app.summary_text.configure(yscrollcommand=summary_scroll.set)
+    app.summary_text.pack(fill='x', pady=(8, 0))
 
     panel, body = card(content, 16)
     panel.pack(fill="both", expand=True, pady=(20, 0))

@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from lieta_automator.chrome_launcher import prepare_profiles, launch_chrome_in_debug_mode
@@ -9,6 +10,10 @@ from lieta_automator.instance_lock import InstanceLock
 
 class StartupTests(unittest.TestCase):
     def test_mutex_rejects_duplicate_and_releases_after_exit(self):
+        # Exercise a real mutex without conflicting with the user's running app.
+        namespace = patch('lieta_automator.instance_lock.MUTEX_NAME', 'Local\\LietaTest.' + uuid.uuid4().hex)
+        namespace.start()
+        self.addCleanup(namespace.stop)
         with InstanceLock():
             with self.assertRaises(RuntimeError):
                 with InstanceLock():

@@ -193,6 +193,38 @@ class BatchTests(unittest.TestCase):
         path.write_text("corrupt")
         self.assertFalse(legacy.journals["TV Code"].completed("VRT"))
 
+    def test_final_summary_lists_only_remaining_failures_and_detects_missing_files(self):
+        r = self.runner()
+        output = self.root / 'SPY.html'
+        output.write_text('<html>SPY Term</html>')
+        r.journals['Term'].record('SPY', path=output)
+        r.journals['Term'].record('VRT', error='Try Again：本輪兩次一般提交均失敗。')
+        r.data['status'] = 'incomplete'
+        summary = r.final_summary()
+        self.assertEqual(summary['failed'], 1)
+        self.assertEqual(summary['failures'][0]['ticker'], 'VRT')
+        self.assertIn('Term / VRT', summary['text'])
+        output.unlink()
+        self.assertEqual(r.final_summary()['failed'], 2)
+
+    def test_retry_resume_requests_only_failed_model_ticker_pairs(self):
+        r = self.runner(['Gamma', 'Term'])
+        for model in r.models:
+            for ticker in r.tickers:
+                path = self.root / f'{model}_{ticker}.html'
+                path.write_text(f'<html>{ticker} {model}</html>')
+                r.journals[model].record(ticker, path=path)
+        r.journals['Term'].record('VRT', error='Try Again')
+        resumed = BatchRunner(resume=r.path)
+        scraper = Mock()
+        output = self.root / 'retry.html'
+        output.write_text('<html>VRT Term</html>')
+        scraper._download_html.return_value = output
+        with patch.object(resumed, '_fetch', return_value=PageState(result_key='fresh')) as fetch:
+            for model in resumed.models:
+                resumed._model(scraper, model)
+        self.assertEqual([(c.args[1], c.args[2]) for c in fetch.call_args_list], [('Term', 'VRT')])
+
     def test_paused_model_does_not_prevent_other_model_completion(self):
         r = self.runner(["Gamma", "TV Code"])
         def factory(folder, port):

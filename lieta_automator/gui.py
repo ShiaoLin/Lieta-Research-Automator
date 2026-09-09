@@ -20,7 +20,7 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Automator 1.1.1 · 模型下載工作台")
+        self.root.title("Lieta Automator 1.1.2 · 模型下載工作台")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -234,6 +234,7 @@ class TickerApp:
                 for model, var in self.selected_models.items():
                     var.set(model in self.runner.models)
             self.automation_running = True
+            self._set_summary('批次執行中；結束後列出每個模型的成功數與未完成項目。')
             self.validate_inputs()
             self.toggle_ui_state(False)
             self.resume_button.config(state="disabled")
@@ -257,6 +258,23 @@ class TickerApp:
                                           initialdir=os.path.join(config.BASE_DIR, "runs"))
         if path:
             self._start_batch(path)
+
+    def _set_summary(self, text):
+        self.summary_text.configure(state='normal')
+        self.summary_text.delete('1.0', 'end')
+        self.summary_text.insert('1.0', text)
+        self.summary_text.configure(state='disabled')
+
+    def _retry_failed(self):
+        if self.automation_running or self.closing:
+            return
+        if self.runner:
+            if not self.runner.done.is_set():
+                return
+            self._start_batch(str(self.runner.path))
+        else:
+            # After restarting the app, an older batch can be chosen without its original txt.
+            self._resume_batch()
 
     def _poll_batch(self):
         if self.runner:
@@ -290,9 +308,16 @@ class TickerApp:
             self.mode_label.config(text=("獨立視窗" if self.runner.multi else "單視窗") + f" · 提交間隔至少 5 秒 · 等待上限 {dispatch['limit']}")
             if self.runner.done.is_set() and self.automation_running:
                 self.automation_running = False
+                report = self.runner.data.get('summary')
+                if report:
+                    self._set_summary(report['text'])
+                else:
+                    self._set_summary('結束摘要未能產生，請查看執行紀錄與批次 JSON。')
                 if not self.closing:
                     self.toggle_ui_state(True)
                     self.resume_button.config(state="normal")
+                    remaining = report['failed'] if report else total - success
+                    self.retry_button.config(state='normal' if remaining else 'disabled')
             if self.closing and self.runner.done.is_set():
                 self.root.destroy()
                 return
@@ -307,6 +332,7 @@ class TickerApp:
         
         self.settings_button.config(state=state)
         self.resume_button.config(state=state)
+        self.retry_button.config(state=state)
         for cb in self.model_checks:
             cb.config(state=state)
         self.stop_button.config(state="disabled" if is_enabled else "normal")
@@ -326,6 +352,7 @@ class TickerApp:
             self.start_button.config(state="disabled")
             self.resume_button.config(state="disabled")
             self.stop_button.config(state="disabled")
+            self.retry_button.config(state="disabled")
         else:
             self.root.destroy()
 

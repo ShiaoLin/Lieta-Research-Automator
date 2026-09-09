@@ -92,3 +92,29 @@ class GuiTests(unittest.TestCase):
             self.assertIn('36 / 37', app.model_counts['Term']['text'])
             self.assertEqual(app.model_status['Gamma'][0]['text'], '本批次未選擇')
             self.assertEqual(str(app.resume_button['state']), 'normal')
+
+    def test_retry_button_uses_finished_batch_not_current_form(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = self.make_app(folder)
+            runner = Mock(done=threading.Event(), path='original-batch.json')
+            runner.done.set()
+            app.runner = runner
+            with patch.object(app, '_start_batch') as start:
+                app.retry_button.invoke()
+                start.assert_called_once_with('original-batch.json')
+                app.automation_running = True
+                app._retry_failed()
+                self.assertEqual(start.call_count, 1)
+
+    def test_final_summary_exposes_failed_ticker_and_retry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = self.make_app(folder)
+            runner = Mock(done=threading.Event(), data={'status': 'incomplete', 'summary': {
+                'failed': 1, 'text': '成功 147/148\nSmile / LITE：Try Again'}})
+            runner.done.set()
+            runner.snapshot.return_value = ({'Smile': {'state': '完成，仍有失敗', 'ticker': '',
+                'success': 36, 'pending': 1}}, {'cooldown': 0, 'active': 0, 'limit': 1})
+            app.runner, app.automation_running = runner, True
+            app._poll_batch()
+            self.assertIn('Smile / LITE', app.summary_text.get('1.0', 'end'))
+            self.assertEqual(str(app.retry_button['state']), 'normal')

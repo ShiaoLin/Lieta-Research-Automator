@@ -1,4 +1,6 @@
-# Lieta Research Automator 1.1.1
+# Lieta Research Automator 1.1.2
+
+1.1.2 新增「開始下載」下方的「重試失敗項目」與可捲動、可複製的最後總結。重試使用原批次紀錄，只請求未完成或檔案驗證失敗的項目；重新開啟程式後可選擇舊批次。詳細見 [1.1.2 說明](docs/release-1.1.2.md)。以下命令亦可將執行檔名稱替換為 `LietaAutomator_1.1.2.exe`。
 
 四模型四視窗共用請求排程，預設最多一個請求等待結果。Gamma、Term、Smile、TV Code 各自跑完整份清單，存檔不占用等待名額。
 

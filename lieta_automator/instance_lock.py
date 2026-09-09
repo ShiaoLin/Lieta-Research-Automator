@@ -2,6 +2,8 @@
 import ctypes
 from ctypes import wintypes
 
+MUTEX_NAME = "Local\\LietaAutomator.Chrome9222_9225"
+
 
 class InstanceLock:
     def __enter__(self):
@@ -11,7 +13,7 @@ class InstanceLock:
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel.CloseHandle.restype = wintypes.BOOL
         self.kernel = kernel
-        self.handle = kernel.CreateMutexW(None, False, "Local\\LietaAutomator.Chrome9222_9225")
+        self.handle = kernel.CreateMutexW(None, False, MUTEX_NAME)
         error = ctypes.get_last_error()
         if not self.handle:
             raise ctypes.WinError(error)

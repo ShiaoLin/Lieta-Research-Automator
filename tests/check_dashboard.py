@@ -43,6 +43,7 @@ def main():
             app.log_text.insert('end', '介面預覽：此畫面使用模擬資料，沒有向網站發送請求。\n')
             app.log_text.config(state='disabled')
             app._poll_batch()
+            app._set_summary('介面預覽：成功 147/148，未完成 1 項\nSmile / LITE：Try Again：本輪兩次一般提交均失敗。')
             root.update()
             hwnd = int(root.wm_frame(), 16)
             ImageGrab.grab(window=hwnd).save(output / 'dashboard.png')

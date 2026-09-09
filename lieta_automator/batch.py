@@ -75,6 +75,7 @@ class BatchRunner:
                                          "pending": len(tickers)}
         self.data["limit"] = limit
         self.data["status"] = "prepared"
+        self.data.pop("summary", None)
         self.data.setdefault("history", []).append({"started": datetime.now().isoformat(), "limit": limit})
         self.metrics = {"submissions": 0, "try_again": 0, "timeouts": 0, "unauthorized": 0,
                         "abandoned": 0}
@@ -105,6 +106,29 @@ class BatchRunner:
         with self.lock:
             value = json.loads(json.dumps(self.data["states"]))
         return value, self.dispatch.snapshot()
+
+    def final_summary(self):
+        """Revalidate outputs on the worker thread, never during Tk polling."""
+        failures, lines, completed = [], [], 0
+        for model, journal in self.journals.items():
+            missing = []
+            for ticker in self.tickers:
+                if journal.completed(ticker):
+                    completed += 1
+                    continue
+                item = journal.data['items'].get(ticker, {})
+                reason = ('已完成檔案缺失或內容驗證失敗' if item.get('status') == 'complete'
+                          else item.get('error') or self.data.get('error') or '尚未完成，等待續跑')
+                failures.append({'model': model, 'ticker': ticker, 'reason': reason})
+                missing.append(ticker)
+            lines.append(f"{model}：{len(self.tickers) - len(missing)}/{len(self.tickers)}" +
+                         (f"；未完成：{', '.join(missing)}" if missing else '；全部完成'))
+        total = len(self.models) * len(self.tickers)
+        heading = f"批次結束：成功 {completed}/{total}，未完成 {len(failures)} 項"
+        details = [f"{item['model']} / {item['ticker']}：{item['reason']}" for item in failures]
+        text = '\n'.join([heading, *lines, *details, f'續跑紀錄：{self.path}'])
+        return {'completed': completed, 'total': total, 'failed': len(failures),
+                'failures': failures, 'text': text}
 
     def request_stop(self):
         self.dispatch.request_stop()
@@ -223,8 +247,10 @@ class BatchRunner:
                 auth_retry = True
             else:
                 self._reset(scraper, model, ticker, timeout=outcome == "timeout")
-                if outcome == "timeout" or ordinary >= 2:
-                    raise Deferred("逾時或重試用盡，延後補抓。")
+                if outcome == "timeout":
+                    raise Deferred(f"逾時：{self.response_timeout} 秒未取得有效結果。")
+                if ordinary >= 2:
+                    raise Deferred("Try Again：本輪兩次一般提交均失敗。")
                 auth_retry = False
 
     def _model(self, scraper, model):
@@ -345,4 +371,11 @@ class BatchRunner:
             logger.exception("批次無法完成")
             return 2
         finally:
-            self.done.set()
+            try:
+                self.data['summary'] = self.final_summary()
+                self._save()
+                logger.info(self.data['summary']['text'])
+            except Exception:
+                logger.exception('無法寫入結束摘要，請核對批次紀錄。')
+            finally:
+                self.done.set()

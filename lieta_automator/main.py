@@ -17,7 +17,7 @@ def _self_check(output):
 
     manager = SeleniumManager()._get_binary()
     icon = Path(getattr(sys, "_MEIPASS", config.BASE_DIR)) / "settings.png"
-    report = {"version": "1.1.1", "python": sys.version,
+    report = {"version": "1.1.2", "python": sys.version,
               "selenium": selenium.__version__, "pillow": PIL.__version__,
               "tk": tkinter.TkVersion, "tcl": tkinter.Tcl().eval("info patchlevel"),
               "selenium_manager": str(manager),
@@ -60,7 +60,7 @@ def _run_automated(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Lieta Research 自動化工具 v1.1.1")
+    parser = argparse.ArgumentParser(description="Lieta Research 自動化工具 v1.1.2")
     parser.add_argument("--run-automated", action="store_true", help="使用儲存的設定執行背景下載")
     parser.add_argument("--continue-batch", metavar="BATCH_JSON", help="通知執行中的批次重新檢查指定模型登入")
     parser.add_argument("--continue-model", choices=["Gamma", "Term", "Smile", "TV Code"])
