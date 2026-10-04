@@ -36,6 +36,16 @@ runs/
 agent_runs/
 agent_control/
 .test-output/
+.cleanup-archive/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.tmp
+*.partial
+*.crdownload
+*.exe
+*.zip
 *.egg-info/
 
 # AI assistant internal files
