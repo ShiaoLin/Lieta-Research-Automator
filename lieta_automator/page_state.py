@@ -5,6 +5,7 @@ import re
 
 from .request_flow import PageState
 from .notice_monitor import NOTICE_MONITOR_SCRIPT
+from .table_result import is_table_text
 
 
 SNAPSHOT_SCRIPT = "const noticeMonitor = " + NOTICE_MONITOR_SCRIPT + r""";
@@ -20,18 +21,23 @@ const loginPage = !visible(input) && (
     /^\/auth(?:\/|$)/i.test(location.pathname) ||
     Array.from(document.querySelectorAll('a[href="/auth"], input[type="password"]')).some(visible));
 const charts = Array.from(document.querySelectorAll('svg.main-svg')).filter(visible);
+const tables = Array.from(document.querySelectorAll('table')).filter(visible);
 const paragraphs = Array.from(document.querySelectorAll('p')).filter(visible);
 const capture = el => ({node: el, html: el.outerHTML, text: el.tagName.toLowerCase() === 'svg'
     ? Array.from(el.querySelectorAll('text')).map(text => text.textContent || '').join('\n')
+    : el.tagName.toLowerCase() === 'table'
+    ? Array.from(el.querySelectorAll('th,td')).map(cell => cell.textContent || '').join('\n')
     : (el.textContent || '')});
 return {
     authenticated: !loginPage,
     sessionExpired: noticeMonitor.sessionExpired,
     selectedModel: model ? model.innerText.trim() : '',
+    inputTicker: input ? input.value.trim().toUpperCase() : '',
     busy: Boolean(submit && (submit.disabled || submit.getAttribute('aria-busy') === 'true' ||
         /loading|載入中|處理中|計算中/i.test(submit.innerText))),
     downloadable: Boolean(download && !download.disabled),
     charts: charts.map(capture),
+    tables: tables.map(capture),
     paragraphs: paragraphs.map(capture),
     errors: noticeMonitor.events.map(event => 'toast:' + event.id + ':' + event.text)
 };
@@ -57,6 +63,14 @@ def read_page_state(driver, ticker, model):
         text = "\n".join(part["text"].strip() for part in parts)
         matches = bool(parts)
         ready = bool(text)
+    elif model == "Table":
+        parts = [part for part in snapshot['charts'] + snapshot.get('tables', [])
+                 if is_table_text(part['text'])]
+        text = '\n'.join(part['text'] for part in parts)
+        # Freshness is enforced by the fetch loop. Every Table ticker starts
+        # from a clean document because the table itself has no ticker title.
+        matches = bool(parts) and snapshot.get('inputTicker') == ticker.upper()
+        ready = bool(parts) and snapshot['downloadable']
     else:
         parts = snapshot["charts"]
         text = "\n".join(part["text"] for part in parts)

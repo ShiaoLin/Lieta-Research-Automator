@@ -15,7 +15,7 @@ from .request_flow import LoginRequired
 from .scraper import LietaScraper
 from .storage import replace_file
 
-MODELS = ("Gamma", "Term", "Smile", "TV Code")
+MODELS = config.MODELS
 
 
 class Deferred(Exception):
@@ -276,6 +276,10 @@ class BatchRunner:
                 while True:
                     self.dispatch.check_stop()
                     try:
+                        if model == "Table":
+                            # A fresh page prevents an unlabelled table from the
+                            # preceding ticker being attributed to this item.
+                            scraper._select_model(model, refresh=True)
                         scraper._fill_ticker(ticker)
                         result = self._fetch(scraper, model, ticker)
                         self.state(model, "存檔中", ticker)

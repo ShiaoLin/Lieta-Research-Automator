@@ -20,6 +20,7 @@ from .notice_monitor import install_notice_monitor, stop_notice_monitor
 from .page_state import contains_ticker, read_page_state
 from .request_flow import LoginRequired, SHARED_COORDINATOR, fetch_result
 from .storage import replace_file
+from .table_result import valid_table_export
 
 
 class LietaScraper:
@@ -140,7 +141,7 @@ class LietaScraper:
             (By.CSS_SELECTOR, 'button[type="submit"]'))).click()
 
     def run_automation(self, tickers, model, destination_path, resume_path=None):
-        if model not in ("Gamma", "Term", "Smile", "TV Code"):
+        if model not in config.MODELS:
             raise ValueError(f"不支援的模型: {model}")
         tickers = list(dict.fromkeys(t.strip().upper() for t in tickers if t.strip()))
         if any(ticker in (".", "..") or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.^_-"
@@ -159,7 +160,7 @@ class LietaScraper:
                 try:
                     with self.coordinator.request_slot():
                         self._wait_for_slot()
-                        if reset_page:
+                        if reset_page or model == "Table":
                             self._select_model(model)
                             reset_page = False
                         self._fill_ticker(ticker)
@@ -218,7 +219,7 @@ class LietaScraper:
         self._wait().until(EC.element_to_be_clickable(
             (By.XPATH, "//button[contains(., '下載') or contains(., 'Download')]"))).click()
         source = self._wait_for_download(folder)
-        self._validate_html(source, ticker)
+        self._validate_html(source, ticker, model)
         target_dir = Path(destination) / model / ticker
         target_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H;%M")
@@ -252,10 +253,15 @@ class LietaScraper:
         raise TimeoutError("下載未完成，未將檔案列為成功。")
 
     @staticmethod
-    def _validate_html(path, ticker):
+    def _validate_html(path, ticker, model=None):
         content = Path(path).read_text(encoding="utf-8-sig")
         lower = content.lower()
-        if "<html" not in lower or "</html>" not in lower or not contains_ticker(content, ticker):
+        if "<html" not in lower or "</html>" not in lower:
+            raise ValueError("下載的 HTML 不完整。")
+        if model == "Table":
+            if not valid_table_export(content):
+                raise ValueError("下載的 Table HTML 沒有完整表頭與資料列。")
+        elif not contains_ticker(content, ticker):
             raise ValueError(f"下載的 HTML 不完整或找不到 ticker {ticker}。")
 
     @staticmethod

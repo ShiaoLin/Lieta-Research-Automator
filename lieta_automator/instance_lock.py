@@ -2,6 +2,7 @@
 import ctypes
 from ctypes import wintypes
 
+# Keep the historical name so 1.1.x and 1.2.x cannot control shared ports together.
 MUTEX_NAME = "Local\\LietaAutomator.Chrome9222_9225"
 
 

@@ -20,7 +20,7 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Automator 1.1.2 · 模型下載工作台")
+        self.root.title("Lieta Automator 1.2.0 · 模型下載工作台")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -187,7 +187,7 @@ class TickerApp:
         self.start_button.config(state="normal" if not missing and not self.automation_running and not self.closing else "disabled")
         self.open_dest_button.config(state="normal" if has_dest else "disabled")
         if not self.automation_running:
-            mode = "四模型獨立視窗" if self.user_settings.get("enable_multi_window", True) else "單視窗依序執行"
+            mode = "各模型獨立視窗" if self.user_settings.get("enable_multi_window", True) else "單視窗依序執行"
             self.mode_label.config(text=f"{mode} · 等待上限 1")
 
     def start_automation_thread(self):

@@ -1,4 +1,4 @@
-"""Opt-in four-Chrome test with a real 90-second timeout; localhost only."""
+"""Opt-in multi-Chrome test with a real 90-second timeout; localhost only."""
 from collections import Counter
 import json
 import os
@@ -111,7 +111,8 @@ class TimeoutBrowserTests(unittest.TestCase):
                             following = [t for t in arrivals if t > when]
                             if following:
                                 self.assertGreaterEqual(min(following) - when, details['seconds'] - .2)
-                    print('11/12 verified; only deliberate permanent error remains. Real 90s timeout, late result, 5s spacing and cooldown passed.')
+                    total = len(MODELS) * len(runner.tickers)
+                    print(f'{total - 1}/{total} verified; only deliberate permanent error remains. Real 90s timeout, late result, 5s spacing and cooldown passed.')
                 finally:
                     runner.request_stop()
                     worker.join(35)

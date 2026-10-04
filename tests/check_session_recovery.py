@@ -23,6 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from lieta_automator.page_state import read_page_state
 from lieta_automator.request_flow import LoginRequired, RequestCoordinator, RetryPolicy, fetch_result
 from lieta_automator.scraper import LietaScraper
+from lieta_automator.config import MODELS
 
 
 PAGE = """<!doctype html><html><body>
@@ -31,7 +32,7 @@ PAGE = """<!doctype html><html><body>
 <input placeholder="Ticker"><button type="submit" onclick="requestModel(this)">Submit</button>
 <button>Download</button><div id="result"></div><div role="alert" id="notice"></div>
 <script>
-for (const model of ['Gamma','Term','Smile','TV Code']) {
+for (const model of ['Gamma','Term','Smile','TV Code','Table']) {
   const option = document.createElement('button'); option.role='option'; option.textContent=model;
   option.onclick=()=>{document.querySelector('[role=combobox]').textContent=model;menu.hidden=true;};
   menu.appendChild(option);
@@ -49,6 +50,7 @@ async function requestModel(button) {
   }
   notice.textContent='';button.disabled=false;
   result.innerHTML=model==='TV Code' ? '<p>'+ticker+': verified-code</p>' :
+    model==='Table' ? '<svg class="main-svg"><text>Expiration</text><text>Gex</text><text>Dex</text><text>Total</text><text>100</text><text>200</text></svg>' :
     '<svg class="main-svg"><text>'+ticker+' '+model+' fresh</text></svg>';
   window.requestCompleted=true;
 }
@@ -141,9 +143,9 @@ class BrowserRecoveryTests(unittest.TestCase):
             recover_session=lambda: self.scraper._restore_session("VRT", model),
         )
 
-    def test_all_four_models_refresh_and_resubmit_same_ticker(self):
+    def test_all_models_refresh_and_resubmit_same_ticker(self):
         self.server.mode = "flash"
-        for model in ("Gamma", "Term", "Smile", "TV Code"):
+        for model in MODELS:
             with self.subTest(model=model):
                 self.server.visits = 0
                 self.server.requests = []

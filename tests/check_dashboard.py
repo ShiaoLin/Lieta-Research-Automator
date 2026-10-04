@@ -17,7 +17,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as folder, \
             patch('lieta_automator.gui.settings.load_settings', return_value={'enable_multi_window': True,
-                'last_selected_models': ['Gamma', 'Term', 'Smile', 'TV Code']}), \
+                'last_selected_models': ['Gamma', 'Term', 'Smile', 'TV Code', 'Table']}), \
             patch('lieta_automator.config.TEMP_DOWNLOAD_DIR_NAME', folder), \
             patch.object(TickerApp, '_setup_logging'):
         root = tk.Tk()
@@ -34,6 +34,7 @@ def main():
                 'Term': {'state': '等待結果', 'ticker': 'DEMO', 'success': 24, 'pending': 13, 'deferred': 1},
                 'Smile': {'state': '等待提交', 'ticker': 'DEMO', 'success': 25, 'pending': 12, 'deferred': 0},
                 'TV Code': {'state': '等待登入', 'ticker': 'DEMO', 'success': 22, 'pending': 15, 'deferred': 0},
+                'Table': {'state': '等待提交', 'ticker': 'DEMO', 'success': 21, 'pending': 16, 'deferred': 0},
             }
             app.runner = SimpleNamespace(done=threading.Event(), dispatch=SimpleNamespace(stop=threading.Event()),
                 multi=True, snapshot=lambda: (states, {'cooldown': 20, 'active': 1, 'limit': 1}))
@@ -43,7 +44,7 @@ def main():
             app.log_text.insert('end', '介面預覽：此畫面使用模擬資料，沒有向網站發送請求。\n')
             app.log_text.config(state='disabled')
             app._poll_batch()
-            app._set_summary('介面預覽：成功 147/148，未完成 1 項\nSmile / LITE：Try Again：本輪兩次一般提交均失敗。')
+            app._set_summary('介面預覽：批次進行中，完成 129/185 項\n此處會在批次結束後列出各模型的未完成 ticker。')
             root.update()
             hwnd = int(root.wm_frame(), 16)
             ImageGrab.grab(window=hwnd).save(output / 'dashboard.png')

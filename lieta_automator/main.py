@@ -17,7 +17,7 @@ def _self_check(output):
 
     manager = SeleniumManager()._get_binary()
     icon = Path(getattr(sys, "_MEIPASS", config.BASE_DIR)) / "settings.png"
-    report = {"version": "1.1.2", "python": sys.version,
+    report = {"version": "1.2.0", "models": list(config.MODELS), "python": sys.version,
               "selenium": selenium.__version__, "pillow": PIL.__version__,
               "tk": tkinter.TkVersion, "tcl": tkinter.Tcl().eval("info patchlevel"),
               "selenium_manager": str(manager),
@@ -60,17 +60,17 @@ def _run_automated(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Lieta Research 自動化工具 v1.1.2")
+    parser = argparse.ArgumentParser(description="Lieta Research 自動化工具 v1.2.0")
     parser.add_argument("--run-automated", action="store_true", help="使用儲存的設定執行背景下載")
     parser.add_argument("--continue-batch", metavar="BATCH_JSON", help="通知執行中的批次重新檢查指定模型登入")
-    parser.add_argument("--continue-model", choices=["Gamma", "Term", "Smile", "TV Code"])
-    parser.add_argument("--resume-batch", metavar="BATCH_JSON", help="續跑整批四模型紀錄")
+    parser.add_argument("--continue-model", choices=config.MODELS)
+    parser.add_argument("--resume-batch", metavar="BATCH_JSON", help="續跑整批模型紀錄")
     parser.add_argument("--max-inflight", type=int, choices=[1, 2], default=1, help="同時等待結果上限；預設 1")
     parser.add_argument("--multi-window", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--resume", metavar="RUN_JSON", help="續跑指定的 runs/*.json 紀錄")
     parser.add_argument("--tickers-file", help="背景執行使用的 ticker 清單")
     parser.add_argument("--destination", help="背景執行使用的儲存目錄")
-    parser.add_argument("--models", nargs="+", choices=["Gamma", "Term", "Smile", "TV Code"])
+    parser.add_argument("--models", nargs="+", choices=config.MODELS)
     parser.add_argument("--self-check", metavar="REPORT_JSON", help="驗證打包內容並輸出報告")
     args = parser.parse_args(argv)
     if args.self_check:

@@ -13,7 +13,9 @@ else:
 # --- Chrome and Selenium Settings ---
 CHROME_EXECUTABLE_PATH = None # Set to a specific path if auto-detection fails
 # A list of ports to allow for concurrent Chrome instances.
-REMOTE_DEBUGGING_PORTS = [9222, 9223, 9224, 9225]
+REMOTE_DEBUGGING_PORTS = [9222, 9223, 9224, 9225, 9226]
+# Append new models to retain legacy continue-command indices.
+MODELS = ("Gamma", "Term", "Smile", "TV Code", "Table")
 SELENIUM_TIMEOUT = 10 # seconds
 
 def get_chrome_user_data_dir(port: int) -> str:
