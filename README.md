@@ -1,4 +1,6 @@
-# Lieta Research Automator 1.2.0
+# Lieta Research Automator 1.3.0
+
+1.3.0 新增 AI 程式控制入口，GUI 保留顯示與手動操作。可一次指定多份清單及各自目的地，各模型依序推進；登入受阻只暫停該模型，其他模型可繼續後面的清單。每份清單每模型完成既有補抓後，額外自動重試失敗一次。跨清單保留共用冷卻，監測命令退出不會關閉下載程式。詳見 [AI 操作說明](docs/agent-interface.md)、[任務清單範例](docs/agent-plan.example.json) 與 [1.3.0 說明](docs/release-1.3.0.md)。
 
 1.2.0 新增 Table 模型，支援下載、狀態顯示、登入後繼續、失敗重試及批次續跑。沿用 HTML 存放規則：`目的地/Table/TICKER/YYYY-MM-DD_HH;MM_TICKER_Table.html`。詳細見 [1.2.0 說明](docs/release-1.2.0.md)。
 
@@ -6,7 +8,7 @@ Gamma、Term、Smile、TV Code、Table 可各用一個視窗，獨立跑完整�
 
 ## 使用方式
 
-將 `LietaAutomator_1.2.0.exe` 放在原程式資料夾，可沿用設定與 Chrome Profile。升級保留既有模型勾選，請勾選新增的 Table 再開始；續跑舊批次只處理該批次原本的模型。開啟偏好設定勾選多視窗後開始；既有使用者的單視窗設定會保留。全選五模型時會使用第五個 Profile（9226），第一次使用可能需要登入，狀態面板會顯示「等待登入」。登入後按該模型的「登入後繼續」，不影響其他正常視窗。
+將 `LietaAutomator_1.3.0.exe` 放在原程式資料夾，可沿用設定與 Chrome Profile。升級保留既有模型勾選，請勾選新增的 Table 再開始；續跑舊批次只處理該批次原本的模型。開啟偏好設定勾選多視窗後開始；既有使用者的單視窗設定會保留。全選五模型時會使用第五個 Profile（9226），第一次使用可能需要登入，狀態面板會顯示「等待登入」。登入後按該模型的「登入後繼續」，不影響其他正常視窗。
 
 淺色下載工作台提供左側設定、右側五模型卡片、批次總覽與冷卻倒數，下方為最後總結及執行紀錄。缺少清單、模型或目的地時顯示提示；下載期間鎖定設定。「停止並保存進度」會通知工作執行緒結束，保留視窗供查看及續跑。小視窗可垂直捲動，鍵盤焦點會帶到可見位置。續跑會顯示原批次的模型與實際儲存位置。
 
@@ -33,16 +35,16 @@ Gamma、Term、Smile、TV Code、Table 可各用一個視窗，獨立跑完整�
 GUI、背景命令和既有排程使用同一個批次執行器。未指定視窗模式時採用儲存設定。沒有新增每日排程。
 
 ```powershell
-.\LietaAutomator_1.2.0.exe --run-automated --multi-window --max-inflight 1
-.\LietaAutomator_1.2.0.exe --run-automated --models Table
-.\LietaAutomator_1.2.0.exe --resume-batch .\runs\batch_批次紀錄.json
-.\LietaAutomator_1.2.0.exe --resume .\runs\舊版單模型紀錄.json
+.\LietaAutomator_1.3.0.exe --run-automated --multi-window --max-inflight 1
+.\LietaAutomator_1.3.0.exe --run-automated --models Table
+.\LietaAutomator_1.3.0.exe --resume-batch .\runs\batch_批次紀錄.json
+.\LietaAutomator_1.3.0.exe --resume .\runs\舊版單模型紀錄.json
 ```
 
 背景模式遇登入問題也會保留該視窗等待，不自動結束；登入後由另一個命令通知該模型重新檢查：
 
 ```powershell
-.\LietaAutomator_1.2.0.exe --continue-batch .\runs\batch_批次紀錄.json --continue-model Table
+.\LietaAutomator_1.3.0.exe --continue-batch .\runs\batch_批次紀錄.json --continue-model Table
 ```
 
 `--no-multi-window` 保留單視窗模式；單視窗遇登入暫停時後續模型也需等待。`--max-inflight 2` 僅供明確選擇的對照測試。續跑不沿用先前的實驗上限，預設仍為 1。
@@ -60,7 +62,7 @@ python tests/check_batch_browser.py -v
 python tests/check_batch_timeout.py -v
 python tests/check_background_chrome.py
 python -m PyInstaller --noconfirm LietaAutomator.spec
-.\dist\LietaAutomator_1.2.0.exe --self-check frozen-check.json
+.\dist\LietaAutomator_1.3.0.exe --self-check frozen-check.json
 ```
 
 前兩個 Chrome 通知測試使用本機測試頁與獨立無介面 Chrome。`check_background_chrome.py` 會操作已登入的實站 Chrome 選單，但不提交模型请求。Chrome 整合測試可透過 `LIETA_TEST_CHROMEDRIVER` 指定已安裝驅動路徑。

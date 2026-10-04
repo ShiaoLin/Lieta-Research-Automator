@@ -24,9 +24,12 @@ class Deferred(Exception):
 
 class BatchRunner:
     def __init__(self, tickers=None, models=None, destination=None, *, multi=True,
-                 limit=1, resume=None, response_timeout=90, scraper_factory=LietaScraper):
+                 limit=1, resume=None, response_timeout=90, scraper_factory=LietaScraper,
+                 dispatcher=None, port=None, prepare_profiles=True):
         self.lock = threading.RLock()
-        self.dispatch = Dispatcher(limit)
+        self.dispatch = dispatcher if dispatcher is not None else Dispatcher(limit)
+        self.port = port
+        self.prepare_profiles = prepare_profiles
         self.response_timeout = response_timeout
         self.scraper_factory = scraper_factory
         self.threads = []
@@ -73,7 +76,7 @@ class BatchRunner:
             self.data["journals"][model] = str(journal.path.resolve())
             self.data["states"][model] = {"state": "準備中", "ticker": "", "success": 0,
                                          "pending": len(tickers)}
-        self.data["limit"] = limit
+        self.data["limit"] = self.dispatch.limit
         self.data["status"] = "prepared"
         self.data.pop("summary", None)
         self.data.setdefault("history", []).append({"started": datetime.now().isoformat(), "limit": limit})
@@ -349,9 +352,13 @@ class BatchRunner:
         logger.info(f"整批續跑紀錄: {self.path}")
         try:
             groups = [[m] for m in self.models] if self.multi else [self.models]
-            chrome_launcher.prepare_profiles(config.REMOTE_DEBUGGING_PORTS[:len(groups)])
+            ports = [self.port] if self.port is not None else config.REMOTE_DEBUGGING_PORTS[:len(groups)]
+            if len(ports) != len(groups):
+                raise ValueError("指定埠只適用單一模型工作視窗。")
+            if self.prepare_profiles:
+                chrome_launcher.prepare_profiles(ports)
             for index, models in enumerate(groups):
-                thread = threading.Thread(target=self._worker, args=(models, config.REMOTE_DEBUGGING_PORTS[index]))
+                thread = threading.Thread(target=self._worker, args=(models, ports[index]))
                 self.threads.append(thread)
                 thread.start()
             for thread in self.threads:

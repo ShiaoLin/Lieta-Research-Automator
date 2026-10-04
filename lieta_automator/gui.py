@@ -1,9 +1,11 @@
 import logging
+import json
 import os
 import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -11,6 +13,8 @@ from . import config, settings
 from .logger import TkinterLogHandler, logger
 from .batch import BatchRunner
 from .dashboard import build_dashboard, COLORS
+from .agent_plan import AgentPlan, fingerprint, identifier
+from .dispatch import Dispatcher
 
 
 class TickerApp:
@@ -20,7 +24,7 @@ class TickerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Lieta Automator 1.2.0 · 模型下載工作台")
+        self.root.title("Lieta Automator 1.3.0 · 模型下載工作台")
 
         self.user_settings = settings.load_settings()
         self.tickers = []
@@ -35,6 +39,7 @@ class TickerApp:
         self.automation_running = False
         self.runner = None
         self.closing = False
+        self.pacing_state = {}
         self.log_formatter = logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S')
 
         self._setup_ui()
@@ -120,6 +125,8 @@ class TickerApp:
         self.validate_inputs()
 
     def _load_tickers_from_path(self, file_path):
+        self.tickers, self.tickers_path = [], ""
+        self.file_label.config(text="尚未載入有效清單")
         try:
             with open(file_path, "r", encoding="utf-8-sig") as f:
                 self.tickers = [line.strip().upper() for line in f if line.strip()]
@@ -222,8 +229,10 @@ class TickerApp:
             current = settings.load_settings()
             current["last_selected_models"] = selected
             settings.save_settings(current)
+            dispatcher = self._next_dispatcher()
             self.runner = BatchRunner(self.tickers.copy(), selected, self.destination_path,
-                                      multi=current.get("enable_multi_window", True), resume=resume)
+                                      multi=current.get("enable_multi_window", True), resume=resume,
+                                      dispatcher=dispatcher)
             if resume:
                 # A resumed batch owns its destination and selection, not the form's previous values.
                 self.tickers = self.runner.tickers.copy()
@@ -257,7 +266,13 @@ class TickerApp:
         path = filedialog.askopenfilename(title="選擇批次或單模型續跑紀錄", filetypes=[("JSON", "*.json")],
                                           initialdir=os.path.join(config.BASE_DIR, "runs"))
         if path:
-            self._start_batch(path)
+            try:
+                if json.loads(Path(path).read_text(encoding='utf-8-sig')).get('kind') == 'agent_plan':
+                    self._start_agent_plan(Path(path))
+                else:
+                    self._start_batch(path)
+            except Exception as exc:
+                messagebox.showerror('無法續跑', str(exc))
 
     def _set_summary(self, text):
         self.summary_text.configure(state='normal')
@@ -271,7 +286,10 @@ class TickerApp:
         if self.runner:
             if not self.runner.done.is_set():
                 return
-            self._start_batch(str(self.runner.path))
+            if isinstance(self.runner, AgentPlan):
+                self._start_agent_plan(self.runner.path, retry=True)
+            else:
+                self._start_batch(str(self.runner.path))
         else:
             # After restarting the app, an older batch can be chosen without its original txt.
             self._resume_batch()
@@ -285,7 +303,8 @@ class TickerApp:
                 if state:
                     status = state['state']
                     color = COLORS['warning'] if status == '等待登入' else COLORS['error'] if '錯誤' in status or '失敗' in status else COLORS['accent'] if status == '完成' else COLORS['muted']
-                    label.config(text=f"{status}  {state['ticker']}", foreground=color)
+                    task = f" · {state['task']}" if state.get('task') else ''
+                    label.config(text=f"{status}{task}  {state['ticker']}", foreground=color)
                     self.model_counts[model].config(text=f"完成 {state['success']} / {state['success'] + state['pending']} · 待補抓 {state.get('deferred', 0)}")
                     self.model_progress[model].config(maximum=max(1, state['success'] + state['pending']), value=state['success'])
                     button.config(state="normal" if status == "等待登入" and not self.closing and not self.runner.dispatch.stop.is_set() else "disabled")
@@ -355,6 +374,82 @@ class TickerApp:
             self.retry_button.config(state="disabled")
         else:
             self.root.destroy()
+
+    def _start_agent_plan(self, path, spec=None, retry=False):
+        if self.closing or (self.runner and not self.runner.done.is_set()):
+            raise ValueError('目前仍有任務執行中，請先等待完成或停止並保存。')
+        dispatcher = self._next_dispatcher()
+        runner = AgentPlan(path, spec=spec, dispatcher=dispatcher, retry=retry)
+        self.runner = runner
+        self.tickers, self.tickers_path, self.destination_path = [], '', ''
+        self.file_label.config(text=f"AI 任務 {runner.data['id']} · {len(runner.data['jobs'])} 份清單")
+        self.dest_label.config(text='各清單使用自己的儲存位置，詳見下方任務資訊')
+        for model, var in self.selected_models.items():
+            var.set(model in runner.models)
+        self.automation_running = True
+        self.toggle_ui_state(False)
+        self.input_hint.config(text='AI 任務執行中；各模型依序處理清單')
+        self._set_summary('\n'.join(f"{j['name']}：{j['tickers_file']} → {j['destination']}\n模型：{', '.join(j['models'])}"
+                                     for j in runner.data['jobs']))
+        threading.Thread(target=runner.run, daemon=False).start()
+
+    def _next_dispatcher(self):
+        if self.runner:
+            return self.runner.dispatch.continuation()
+        dispatcher = Dispatcher()
+        dispatcher.restore_pacing(self.pacing_state)
+        return dispatcher
+
+    def agent_status(self):
+        runner = self.runner
+        if runner is None:
+            return {'state': 'idle', 'task': None, 'next_action': 'start', 'poll_after_seconds': 10}
+        if isinstance(runner, AgentPlan):
+            task = runner.report()
+        else:
+            states, dispatch = runner.snapshot()
+            task = {'id': runner.path.stem, 'kind': 'batch', 'status': runner.data.get('status'),
+                    'states': states, 'dispatch': dispatch, 'terminal': runner.done.is_set(),
+                    'needs_login': [m for m, s in states.items() if s['state'] == '等待登入'],
+                    'summary': runner.data.get('summary'), 'pacing': runner.dispatch.pacing()}
+        state = ('closing' if self.closing else task['status'] if task['terminal'] else
+                 'needs_login' if task['needs_login'] else 'cooling_down' if task['dispatch']['cooldown'] > 0 else 'running')
+        return {'state': state, 'task': task, 'next_action':
+                'login_then_continue' if task['needs_login'] else 'review_summary' if task['terminal'] else 'wait',
+                'poll_after_seconds': 10}
+
+    def agent_command(self, command):
+        if self.closing:
+            raise ValueError('程式正在停止並保存，請等待結束。')
+        action, key = command['action'], identifier(command['task_id'])
+        path = Path(config.BASE_DIR) / 'agent_runs' / (key + '.json')
+        if action == 'start':
+            if path.exists():
+                saved = json.loads(path.read_text(encoding='utf-8'))
+                if saved.get('spec_hash') != fingerprint(command['spec']):
+                    raise ValueError('此任務 ID 已搭配另一份設定。新的下載請使用新任務 ID。')
+                return {'task_id': key, 'already_exists': True, 'status': saved['status'],
+                        'next_action': 'query_status_or_resume'}
+            self._start_agent_plan(path, spec=command['spec'])
+        elif action in ('resume', 'retry'):
+            if not path.is_file():
+                raise ValueError('找不到指定的 AI 任務紀錄。')
+            self._start_agent_plan(path, retry=action == 'retry')
+        elif action in ('stop', 'continue'):
+            runner = self.runner
+            if runner is None or runner.path.stem != key or runner.done.is_set():
+                raise ValueError('此任務目前沒有執行，未操作其他任務。')
+            if action == 'stop':
+                self.stop_batch()
+            else:
+                model = command['model']
+                states, _ = runner.snapshot()
+                if states.get(model, {}).get('state') != '等待登入':
+                    raise ValueError('指定模型目前沒有等待登入。')
+                runner.continue_model(model)
+        else:
+            raise ValueError('不支援的控制指令。')
+        return {'task_id': key, 'accepted': True, 'next_action': 'query_status'}
 
 
 class SettingsDialog(tk.Toplevel):

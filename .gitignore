@@ -33,6 +33,8 @@ build/
 dist/
 .build-deps/
 runs/
+agent_runs/
+agent_control/
 .test-output/
 *.egg-info/
 

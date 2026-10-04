@@ -12,6 +12,13 @@ from .storage import read_bytes, replace_file
 
 
 class RunJournal:
+    @classmethod
+    def read_only(cls, path):
+        journal = cls.__new__(cls)
+        journal.path = Path(path)
+        journal.data = json.loads(journal.path.read_text(encoding='utf-8-sig'))
+        return journal
+
     def __init__(self, tickers, model, destination, resume_path=None):
         if resume_path:
             self.path = Path(resume_path)

@@ -102,3 +102,21 @@ class Dispatcher:
         with self.condition:
             return {"active": len(self.active), "limit": self.limit,
                     "cooldown": max(0, self.cooldown_until - self.clock())}
+
+    def pacing(self):
+        with self.condition:
+            now = self.clock()
+            return {"not_before": time.time() + max(0, self.next_submit - now, self.cooldown_until - now),
+                    "failures": self.failures}
+
+    def restore_pacing(self, saved):
+        with self.condition:
+            remaining = max(0, saved.get('not_before', 0) - time.time())
+            self.cooldown_until = max(self.cooldown_until, self.clock() + remaining)
+            self.failures = max(self.failures, int(saved.get('failures', 0)))
+
+    def continuation(self):
+        """Carry rate limits across completed/stopped batches, with a fresh stop flag."""
+        successor = Dispatcher(self.limit, self.interval, self.clock)
+        successor.restore_pacing(self.pacing())
+        return successor

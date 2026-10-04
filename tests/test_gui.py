@@ -8,6 +8,16 @@ from lieta_automator.gui import TickerApp
 
 
 class GuiTests(unittest.TestCase):
+    def test_failed_new_file_load_cannot_reuse_previous_tickers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app = self.make_app(folder)
+            app.tickers = ['OLD']
+            app._load_tickers_from_path(folder + '/missing.txt')
+            self.assertEqual(app.tickers, [])
+            self.assertEqual(app.tickers_path, '')
+            app.validate_inputs()
+            self.assertEqual(str(app.start_button['state']), 'disabled')
+
     def test_status_continue_and_safe_close_use_worker_control(self):
         root = tk.Tk()
         root.withdraw()

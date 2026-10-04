@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "group-a",
+      "name": "清單 A",
+      "tickers_file": "C:\\Lieta\\lists\\group-a.txt",
+      "destination": "G:\\我的雲端硬碟\\model\\group-a",
+      "models": ["Gamma", "Term", "Smile", "TV Code", "Table"]
+    },
+    {
+      "id": "group-b",
+      "name": "清單 B",
+      "tickers_file": "C:\\Lieta\\lists\\group-b.txt",
+      "destination": "G:\\我的雲端硬碟\\model\\group-b",
+      "models": ["Gamma", "Term", "Smile", "TV Code", "Table"]
+    }
+  ]
+}
